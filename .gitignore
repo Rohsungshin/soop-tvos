@@ -1,0 +1,27 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Credentials
+.env
+.env.bak
+*.env.backup
+
+# Claude Code local settings
+.claude/
+
+# macOS resource fork files
+._*
+
+# Package Manager
+.build/
+Packages/
+Package.resolved

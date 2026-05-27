@@ -1,0 +1,45 @@
+name: soop-app
+options:
+  bundleIdPrefix: com.ssroh
+  deploymentTarget:
+    tvOS: "17.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "3"
+    ALWAYS_SEARCH_USER_PATHS: "YES"
+
+targets:
+  soop-app:
+    type: application
+    platform: tvOS
+    sources:
+      - path: soop-app
+        excludes:
+          - "iOSViewController.swift"
+          - "OverlayView.swift"
+          - "TVBrowserViewController.swift"
+          - "ViewController.swift"
+          - "LoginManager.swift"
+          - "CategoryDirectory.swift"
+          - "main.swift"
+    resources:
+      - path: .env
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ssroh.soop-app
+        PRODUCT_NAME: soop-app
+        INFOPLIST_FILE: soop-app/Info.plist
+        CODE_SIGN_ENTITLEMENTS: soop-app/soop-app.entitlements
+        DEVELOPMENT_TEAM: "TGT25B7HKS"
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    preBuildScripts:
+      - path: scripts/copy-env.sh
+        name: "Copy .env to Bundle"
+        basedOnDependencyAnalysis: false
