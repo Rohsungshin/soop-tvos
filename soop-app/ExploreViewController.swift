@@ -40,6 +40,8 @@ final class ExploreViewController: UIViewController {
         // tvOS의 UITableView는 기본적으로 separator 없음 — separatorStyle 속성 미지원
         tableView.dataSource = self
         tableView.delegate = self
+        // v4.1: 포커스 카드 glow가 행 경계를 넘어가도 잘리지 않게
+        tableView.clipsToBounds = false
         tableView.register(SearchEntryCell.self, forCellReuseIdentifier: "search")
         tableView.register(CarouselRowCell.self, forCellReuseIdentifier: "carousel")
         tableView.estimatedRowHeight = 320
@@ -194,11 +196,12 @@ extension ExploreViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tv: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         guard let s = Section(rawValue: indexPath.section) else { return 0 }
+        // v4.1: 포커스 scale 1.10 + 36pt glow 공간 확보 (+60pt)
         switch s {
         case .search:             return 200
-        case .popularBroadcasts:  return 410     // 헤더 50 + 카드 282 + 여백
-        case .popularCategories:  return 350     // 헤더 50 + 카드 220 + 여백
-        case .recent:             return 410
+        case .popularBroadcasts:  return 470
+        case .popularCategories:  return 400
+        case .recent:             return 470
         }
     }
 
@@ -291,6 +294,9 @@ final class CarouselRowCell: UITableViewCell {
         backgroundColor = .clear
         contentView.backgroundColor = .clear
         selectionStyle = .none
+        // v4.1: 포커스된 카드가 scale + glow로 부모 영역을 넘어가도 잘리지 않게 unclip
+        clipsToBounds = false
+        contentView.clipsToBounds = false
 
         titleLabel.font = DS.Typography.subsection
         titleLabel.textColor = DS.Colors.textPrimary
@@ -301,11 +307,14 @@ final class CarouselRowCell: UITableViewCell {
         layout.scrollDirection = .horizontal
         layout.minimumLineSpacing = DS.Spacing.md
         layout.minimumInteritemSpacing = DS.Spacing.md
-        layout.sectionInset = UIEdgeInsets(top: 8, left: DS.Spacing.xl, bottom: 8, right: DS.Spacing.xl)
+        // v4.1: 좌우 글로우 잘림 방지 — sectionInset 좌우는 그대로 두고
+        // 상하 inset을 늘려 위아래로도 글로우 공간 확보
+        layout.sectionInset = UIEdgeInsets(top: 36, left: DS.Spacing.xl, bottom: 36, right: DS.Spacing.xl)
 
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
         collectionView.backgroundColor = .clear
         collectionView.showsHorizontalScrollIndicator = false
+        collectionView.clipsToBounds = false   // 안쪽 카드 glow 살리기
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(LiveBroadcastCell.self, forCellWithReuseIdentifier: "broadcast")

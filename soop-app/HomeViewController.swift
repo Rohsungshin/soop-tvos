@@ -60,6 +60,8 @@ final class HomeViewController: UIViewController {
         // v4: 행 자체를 선택/포커스 대상으로 만들지 않는다 — 안쪽 캐러셀 카드가 포커스 타깃
         tableView.allowsSelection = false
         tableView.allowsFocus = false
+        // v4.1: 포커스 카드가 행 경계를 살짝 넘어가도 잘리지 않게
+        tableView.clipsToBounds = false
         tableView.register(CarouselRowCell.self, forCellReuseIdentifier: "carousel")
         tableView.register(FavoritesCarouselCell.self, forCellReuseIdentifier: "favCarousel")
         tableView.estimatedRowHeight = 360
@@ -274,9 +276,10 @@ extension HomeViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tv: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         guard let s = Section(rawValue: indexPath.section) else { return 0 }
+        // v4.1: 포커스된 카드가 scale 1.10 + 36pt glow로 커지므로 위/아래로 ~50pt 여유 확보
         switch s {
-        case .popularLive, .recent, .favoritesLive: return 410
-        case .popularCategories:                    return 350
+        case .popularLive, .recent, .favoritesLive: return 470
+        case .popularCategories:                    return 400
         }
     }
 }
@@ -295,6 +298,9 @@ final class FavoritesCarouselCell: UITableViewCell {
         backgroundColor = .clear
         contentView.backgroundColor = .clear
         selectionStyle = .none
+        // v4.1: 포커스 scale + glow가 부모 영역 밖으로 나가도 잘리지 않게 unclip
+        clipsToBounds = false
+        contentView.clipsToBounds = false
 
         titleLabel.font = DS.Typography.subsection
         titleLabel.textColor = DS.Colors.textPrimary
@@ -305,11 +311,13 @@ final class FavoritesCarouselCell: UITableViewCell {
         layout.scrollDirection = .horizontal
         layout.minimumLineSpacing = DS.Spacing.md
         layout.minimumInteritemSpacing = DS.Spacing.md
-        layout.sectionInset = UIEdgeInsets(top: DS.Spacing.xs, left: DS.Layout.contentSideMargin, bottom: DS.Spacing.xs, right: DS.Layout.contentSideMargin)
+        // v4.1: 위아래 글로우 공간 확보
+        layout.sectionInset = UIEdgeInsets(top: 36, left: DS.Layout.contentSideMargin, bottom: 36, right: DS.Layout.contentSideMargin)
 
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
         collectionView.backgroundColor = .clear
         collectionView.showsHorizontalScrollIndicator = false
+        collectionView.clipsToBounds = false
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(MyLiveBroadcastCell.self, forCellWithReuseIdentifier: "live")

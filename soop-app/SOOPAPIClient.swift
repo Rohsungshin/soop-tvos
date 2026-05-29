@@ -257,7 +257,12 @@ final class SOOPAPIClient {
     func fetchCategories(maxPages: Int = 7,
                         completion: @escaping (Result<[SOOPCategory], SOOPAPIError>) -> Void) {
         let group = DispatchGroup()
-        var allCats: [SOOPCategory] = []
+        // 페이지별 결과를 분리 보관 — 응답 도착 순서가 dedup 결과에 영향을 미치지 않게 한다.
+        // (기존 버그: 7페이지를 병렬 호출하면 allCats에 append되는 순서가 비결정적이라
+        // 같은 code로 다른 name이 들어올 때 새로고침마다 어느 쪽이 살아남는지 바뀌었음.
+        // 예: 같은 code에 페이지 1=여행, 페이지 2=토크/캠방으로 응답하던 케이스에서
+        // 페이지 2가 먼저 도착하면 토크/캠방이 우선 채택되어 라벨이 뒤바뀌었다.)
+        var pageResults: [Int: [SOOPCategory]] = [:]
         let lock = NSLock()
         var anyFailed = false
 
@@ -290,16 +295,24 @@ final class SOOPAPIClient {
                         imageURL: URL(string: imgStr), tags: tags
                     ))
                 }
-                lock.lock(); allCats.append(contentsOf: pageCats); lock.unlock()
+                lock.lock(); pageResults[page] = pageCats; lock.unlock()
             }.resume()
         }
         group.notify(queue: .main) {
-            // dedup by code
+            // 결정적 머지: 페이지 번호 오름차순으로 순회하여 첫 등장 entry를 채택.
+            // 같은 code의 다른 name이 더 뒷 페이지에 또 나오더라도 무시 → 결과가 항상 같음.
             var seen = Set<String>()
-            let unique = allCats.filter { seen.insert($0.code).inserted }
+            var unique: [SOOPCategory] = []
+            for page in 1...maxPages {
+                for cat in pageResults[page] ?? [] {
+                    if seen.insert(cat.code).inserted {
+                        unique.append(cat)
+                    }
+                }
+            }
             // 정렬: view_cnt 내림차순
             let sorted = unique.sorted { $0.viewCount > $1.viewCount }
-            print("[SOOPAPI] fetchCategories: \(sorted.count) categories")
+            print("[SOOPAPI] fetchCategories: \(sorted.count) categories (deterministic merge)")
             if sorted.isEmpty && anyFailed {
                 completion(.failure(.invalidResponse))
             } else {
