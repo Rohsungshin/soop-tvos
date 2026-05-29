@@ -151,34 +151,63 @@ enum DS {
 }
 
 // MARK: - 포커스 효과 유틸
+//
+// 다크 배경(#0A0A0C)에서 검은 그림자는 사실상 안 보인다 — 3m 시청 거리에서
+// 포커스가 한눈에 들어오도록 다음 3가지를 결합:
+//   1. 큰 스케일 (1.10) — 인접 카드와 명확한 차이
+//   2. SOOP 브랜드 블루 보더 (4pt) — 카드 외곽 윤곽선
+//   3. 블루 글로우 (centered shadow, radius 36) — 다크 배경 위 발광 효과
+//   4. 카드 배경 surfaceElevated 승격 — 미세한 밝기 전환
 
 enum FocusEffect {
-    /// 카드 표준 포커스 — scale + 그림자 (보더 없음)
+    /// 카드 표준 포커스 — scale + 블루 글로우 + 블루 보더
     static func apply(to cell: UICollectionViewCell, focused: Bool) {
         if focused {
-            cell.transform = CGAffineTransform(scaleX: 1.06, y: 1.06)
-            cell.layer.shadowColor  = UIColor.black.cgColor
-            cell.layer.shadowOpacity = 0.7
-            cell.layer.shadowOffset  = CGSize(width: 0, height: 16)
-            cell.layer.shadowRadius  = 24
-            cell.contentView.layer.borderWidth = 0
+            cell.transform = CGAffineTransform(scaleX: 1.10, y: 1.10)
+            cell.contentView.backgroundColor = DS.Colors.surfaceElevated
+            cell.contentView.layer.borderColor = DS.Colors.primary.cgColor
+            cell.contentView.layer.borderWidth = 4
+            // 블루 글로우 (centered shadow = halo effect)
+            cell.layer.shadowColor   = DS.Colors.primary.cgColor
+            cell.layer.shadowOpacity = 0.85
+            cell.layer.shadowOffset  = .zero
+            cell.layer.shadowRadius  = 36
+            cell.layer.shouldRasterize = false
         } else {
             cell.transform = .identity
-            cell.layer.shadowOpacity = 0
+            cell.contentView.backgroundColor = DS.Colors.surface
             cell.contentView.layer.borderWidth = 0
+            cell.layer.shadowOpacity = 0
         }
     }
 
-    /// 보더 포커스 — 검색 진입 같은 비-카드 요소용
+    /// 오프라인/비활성 카드 포커스 — 회색 글로우 (라이브와 시각 차별화)
+    static func applyOffline(to cell: UICollectionViewCell, focused: Bool) {
+        if focused {
+            cell.transform = CGAffineTransform(scaleX: 1.08, y: 1.08)
+            cell.contentView.layer.borderColor = DS.Colors.focusBorderOffline.cgColor
+            cell.contentView.layer.borderWidth = 4
+            cell.layer.shadowColor   = DS.Colors.focusBorderOffline.cgColor
+            cell.layer.shadowOpacity = 0.6
+            cell.layer.shadowOffset  = .zero
+            cell.layer.shadowRadius  = 28
+        } else {
+            cell.transform = .identity
+            cell.contentView.layer.borderWidth = 0
+            cell.layer.shadowOpacity = 0
+        }
+    }
+
+    /// 보더 포커스 — 검색 진입 / 최근 검색어 칩 같은 비-카드 요소용
     static func applyBorder(to view: UIView, focused: Bool) {
         if focused {
-            view.transform = CGAffineTransform(scaleX: 1.03, y: 1.03)
+            view.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
             view.layer.borderColor = DS.Colors.primary.cgColor
             view.layer.borderWidth = 3
-            view.layer.shadowColor = UIColor.black.cgColor
-            view.layer.shadowOpacity = 0.5
-            view.layer.shadowOffset = CGSize(width: 0, height: 10)
-            view.layer.shadowRadius = 16
+            view.layer.shadowColor = DS.Colors.primary.cgColor
+            view.layer.shadowOpacity = 0.6
+            view.layer.shadowOffset = .zero
+            view.layer.shadowRadius = 20
         } else {
             view.transform = .identity
             view.layer.borderWidth = 0

@@ -567,20 +567,7 @@ final class MyOfflineBJCell: UICollectionViewCell {
                                 with coordinator: UIFocusAnimationCoordinator) {
         coordinator.addCoordinatedAnimations { [weak self] in
             guard let self = self else { return }
-            // v2: 오프라인 카드는 회색 보더로 라이브 카드와 시각 차별화
-            if self.isFocused {
-                self.transform = CGAffineTransform(scaleX: 1.06, y: 1.06)
-                self.layer.shadowColor = UIColor.black.cgColor
-                self.layer.shadowOpacity = 0.5
-                self.layer.shadowOffset = CGSize(width: 0, height: 12)
-                self.layer.shadowRadius = 20
-                self.contentView.layer.borderColor = DS.Colors.focusBorderOffline.cgColor
-                self.contentView.layer.borderWidth = 3
-            } else {
-                self.transform = .identity
-                self.layer.shadowOpacity = 0
-                self.contentView.layer.borderWidth = 0
-            }
+            FocusEffect.applyOffline(to: self, focused: self.isFocused)
         }
     }
 }
