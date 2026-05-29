@@ -153,8 +153,31 @@ final class HomeViewController: UIViewController {
     }
 
     private func loadRecent() {
-        recentBroadcasts = RecentWatchStore.shared.load()
-        tableView.reloadData()
+        let saved = RecentWatchStore.shared.load()
+        guard !saved.isEmpty else {
+            recentBroadcasts = []
+            tableView.reloadData()
+            return
+        }
+        // v4.2: 저장된 BJID들을 폴링해서 지금 라이브인 것만 노출.
+        // (저장 시점에는 라이브였더라도 시간이 지나면 종료될 수 있어 그대로 보여주면
+        // 클릭 시 재생 실패 토스트만 뜨는 식의 deadend가 발생함)
+        let bjids = saved.map(\.bjId)
+        SOOPAPIClient.shared.fetchLiveListForBJIDs(bjids) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let live):
+                    // 응답에서 BJID 기반 lookup 만들고, 저장 순서(최신 → 과거)를 유지하며 매핑
+                    var liveByBJID: [String: LiveBroadcast] = [:]
+                    for bc in live { liveByBJID[bc.bjId] = bc }
+                    self.recentBroadcasts = saved.compactMap { liveByBJID[$0.bjId] }
+                case .failure:
+                    self.recentBroadcasts = []
+                }
+                self.tableView.reloadData()
+            }
+        }
     }
 
     fileprivate func didSelectCategory(_ cat: SOOPCategory) {
