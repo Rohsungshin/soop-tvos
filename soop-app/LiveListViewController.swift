@@ -178,8 +178,8 @@ extension LiveListViewController: UICollectionViewDataSource, UICollectionViewDe
                     player.posterThumbnailURL = bc.thumbnailURL
                     player.modalPresentationStyle = .fullScreen
                     self.present(player, animated: true)
-                case .failure:
-                    ToastView.show(in: self.view, message: "재생할 수 없습니다", duration: 1.8)
+                case .failure(let err):
+                    self.showPlaybackError(err)
                 }
             }
         }

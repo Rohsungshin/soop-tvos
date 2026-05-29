@@ -54,6 +54,8 @@ enum SOOPAPIError: Error {
     case decodingFailed(String)
     case streamUnavailable(String)
     case notLive
+    /// SOOP `RESULT=-6` — 19+ 방송에 인증 미통과. AbroadChk=FAIL 쿠키 보유 상태.
+    case adultVerificationRequired
 }
 
 extension Notification.Name {
@@ -585,7 +587,18 @@ final class SOOPAPIClient {
 
             let result = (channel["RESULT"] as? Int) ?? Int(channel["RESULT"] as? String ?? "0") ?? 0
             let bstatus = channel["BSTATUS"] as? String ?? ""
+            // RESULT=-6은 SOOP의 19+ 인증 미통과 신호 (AbroadChk=FAIL 쿠키 상태).
+            // 19+ 방송 시청은 SOOP 계정의 휴대폰 본인인증 + 성인 콘텐츠 보기 활성화가 필요하며
+            // 클라이언트(앱) 측 우회는 불가능하다. 별도 에러로 분리해서 UI에서 구체 메시지를 띄운다.
+            if result == -6 {
+                let abroadChk = HTTPCookieStorage.shared.cookies?
+                    .first(where: { $0.name == "AbroadChk" })?.value ?? "(none)"
+                print("[SOOPAPI] _fetchStreamInfo: RESULT=-6 (adult verification needed). AbroadChk=\(abroadChk)")
+                completion(.failure(.adultVerificationRequired))
+                return
+            }
             if result != 1 || bstatus != "BROADING" {
+                print("[SOOPAPI] _fetchStreamInfo: RESULT=\(result) BSTATUS=\(bstatus) → notLive")
                 completion(.failure(.notLive))
                 return
             }

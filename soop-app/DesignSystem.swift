@@ -320,7 +320,8 @@ final class ToastView: UIView {
         label.textColor = DS.Colors.textPrimary
         label.font = DS.Typography.body
         label.textAlignment = .center
-        label.numberOfLines = 1
+        // v4.4: 19+ 인증 안내 같은 멀티라인 메시지 지원
+        label.numberOfLines = 0
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
 
@@ -333,6 +334,26 @@ final class ToastView: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+// MARK: - 재생 에러 → 사용자 메시지 매핑 (v4.4)
+
+extension UIViewController {
+    /// fetchStreamInfo 실패 시 호출. SOOPAPIError를 구체 토스트 메시지로 변환한다.
+    func showPlaybackError(_ err: SOOPAPIError) {
+        let message: String
+        switch err {
+        case .adultVerificationRequired:
+            message = "성인 인증이 필요한 방송입니다\nSOOP 웹에서 본인인증 + 성인 콘텐츠 보기 설정 후 다시 시도하세요"
+        case .notLive:
+            message = "방송이 종료되었거나 지금 라이브가 아닙니다"
+        case .streamUnavailable(let why):
+            message = "재생할 수 없습니다 (\(why))"
+        default:
+            message = "재생할 수 없습니다"
+        }
+        ToastView.show(in: view, message: message, duration: 3.5)
+    }
 }
 
 // MARK: - 공용 로딩 오버레이 (v2 신규)

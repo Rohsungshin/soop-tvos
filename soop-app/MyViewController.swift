@@ -295,8 +295,8 @@ extension MyViewController: UICollectionViewDataSource, UICollectionViewDelegate
                     p.streamInfo = info
                     p.modalPresentationStyle = .fullScreen
                     self.present(p, animated: true)
-                case .failure:
-                    ToastView.show(in: self.view, message: "재생할 수 없습니다", duration: 1.8)
+                case .failure(let err):
+                    self.showPlaybackError(err)
                 }
             }
         }
