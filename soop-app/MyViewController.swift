@@ -40,6 +40,15 @@ final class MyViewController: UIViewController {
 
     @objc private func onLoginSucceeded() { loadFavorites() }
 
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses where press.type == .playPause {
+            loadFavorites()
+            ToastView.show(in: view, message: "새로고침 중...", duration: 1.2)
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
     private func setupUI() {
         headerView = SectionHeaderView(title: "MY", subtitle: "즐겨찾기 BJ")
         view.addSubview(headerView)

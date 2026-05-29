@@ -109,6 +109,16 @@ final class SearchViewController: UIViewController {
         refreshRecentBox()
     }
 
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses where press.type == .playPause {
+            hasLoadedAll = false
+            loadAllBroadcasts()
+            ToastView.show(in: view, message: "검색 풀 새로고침 중...", duration: 1.2)
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
     private func loadAllBroadcasts() {
         // 상위 5개 카테고리의 방송을 머지해서 검색 풀로 사용
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
