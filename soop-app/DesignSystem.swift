@@ -125,14 +125,14 @@ enum DS {
     enum CardSize {
         /// 카테고리 카드 — 가로 강조, 2줄 제목 지원
         static let category   = CGSize(width: 320, height: 240)
-        /// 라이브 방송 카드 (제목 26pt 2줄 + BJ 16pt)
-        static let broadcast  = CGSize(width: 400, height: 320)
+        /// 라이브 방송 카드 (제목 26pt 2줄 + BJ 16pt) — 정보 영역 ~115pt 확보
+        static let broadcast  = CGSize(width: 400, height: 340)
         /// MY 탭 라이브 방송 카드 — broadcast와 동일 위계
         static let myLive     = CGSize(width: 380, height: 320)
         /// MY 탭 오프라인 BJ 카드
         static let myOffline  = CGSize(width: 240, height: 280)
         /// Explore 인기 캐러셀 카드 — broadcast 카드와 동일
-        static let explorePopular = CGSize(width: 400, height: 320)
+        static let explorePopular = CGSize(width: 400, height: 340)
         /// Explore 인기 카테고리 캐러셀 카드 — 일반 카테고리와 동일
         static let exploreCategory = CGSize(width: 320, height: 240)
         /// HOME/Explore 캐러셀용 작은 라이브 카드
@@ -140,7 +140,7 @@ enum DS {
         /// HOME 추천 BJ 카드 (작은 프로필 카드)
         static let recommendBJ    = CGSize(width: 200, height: 240)
         /// 검색 결과 카드 (LiveBroadcastCell과 동일)
-        static let searchResult   = CGSize(width: 400, height: 320)
+        static let searchResult   = CGSize(width: 400, height: 340)
     }
 
     // MARK: 버튼 인셋 (v2 신규)

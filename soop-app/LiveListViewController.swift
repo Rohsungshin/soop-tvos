@@ -242,13 +242,26 @@ final class LiveBroadcastCell: UICollectionViewCell {
         titleLabel.font = DS.Typography.cardTitleLarge
         titleLabel.numberOfLines = 2
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(titleLabel)
+        // 제목은 잘려도 무방 — BJ 보호를 위해 vertical 압축 허용
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
         bjLabel.textColor = DS.Colors.textSecondary
         bjLabel.font = DS.Typography.caption
-        bjLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(bjLabel)
+        bjLabel.numberOfLines = 1
+        bjLabel.lineBreakMode = .byTruncatingTail
+        // BJ는 절대 잘리지 않도록 보호 — 디자인 우선순위: 콘텐츠 출처 식별
+        bjLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        bjLabel.setContentHuggingPriority(.required, for: .vertical)
+
+        // v4.3: 제목 + BJ를 UIStackView로 묶어 자연스러운 수직 정렬.
+        // 1줄 제목이면 stack은 위쪽 정렬로 컴팩트하게, 2줄 제목이면 자동으로 BJ가 아래로 밀려나도 잘리지 않는다.
+        let infoStack = UIStackView(arrangedSubviews: [titleLabel, bjLabel])
+        infoStack.axis = .vertical
+        infoStack.spacing = 6
+        infoStack.alignment = .leading
+        infoStack.distribution = .fill
+        infoStack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(infoStack)
 
         NSLayoutConstraint.activate([
             imageView.topAnchor.constraint(equalTo: contentView.topAnchor),
@@ -265,14 +278,10 @@ final class LiveBroadcastCell: UICollectionViewCell {
             viewerLabel.heightAnchor.constraint(equalToConstant: 26),
             viewerLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
 
-            titleLabel.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: DS.Spacing.sm),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -DS.Spacing.sm),
-
-            bjLabel.topAnchor.constraint(greaterThanOrEqualTo: titleLabel.bottomAnchor, constant: 4),
-            bjLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: DS.Spacing.sm),
-            bjLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -DS.Spacing.sm),
-            bjLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
+            infoStack.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 12),
+            infoStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: DS.Spacing.sm),
+            infoStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -DS.Spacing.sm),
+            infoStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -12),
         ])
     }
 

@@ -196,12 +196,12 @@ extension ExploreViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tv: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         guard let s = Section(rawValue: indexPath.section) else { return 0 }
-        // v4.1: 포커스 scale 1.10 + 36pt glow 공간 확보 (+60pt)
+        // v4.3: broadcast 카드 높이 320 → 340으로 늘어남에 따라 행 높이 재계산
         switch s {
         case .search:             return 200
-        case .popularBroadcasts:  return 470
-        case .popularCategories:  return 400
-        case .recent:             return 470
+        case .popularBroadcasts:  return 500
+        case .popularCategories:  return 410
+        case .recent:             return 500
         }
     }
 

@@ -299,10 +299,12 @@ extension HomeViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tv: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         guard let s = Section(rawValue: indexPath.section) else { return 0 }
-        // v4.1: 포커스된 카드가 scale 1.10 + 36pt glow로 커지므로 위/아래로 ~50pt 여유 확보
+        // v4.3: 카드 높이 320 → 340으로 늘어남에 따라 행 높이 재계산.
+        // 헤더 ~32 + 12 gap + 16 padding = 60 + collectionView(card 340 + 36 top + 36 bottom inset) 412 = 472, 8pt 여유 = 480.
+        // favoritesLive는 myLive 320 그대로지만 visual 일관성 위해 broadcast와 동일 사용.
         switch s {
-        case .popularLive, .recent, .favoritesLive: return 470
-        case .popularCategories:                    return 400
+        case .popularLive, .recent, .favoritesLive: return 500
+        case .popularCategories:                    return 410
         }
     }
 }
