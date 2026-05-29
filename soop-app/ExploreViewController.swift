@@ -328,6 +328,11 @@ final class CarouselRowCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    // v4: 행 자체가 포커스를 받으면 내부 컬렉션뷰의 카드까지 포커스가 도달하지 않는다.
+    // 셀을 포커스 불가로 만들어 포커스가 안쪽 카드로 흘러 들어가게 한다.
+    override var canBecomeFocused: Bool { false }
+    override var preferredFocusEnvironments: [UIFocusEnvironment] { [collectionView] }
+
     func configure(title: String,
                    broadcasts: [LiveBroadcast],
                    categories: [SOOPCategory],

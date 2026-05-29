@@ -1,15 +1,67 @@
 import UIKit
 
-// MARK: - 검색 화면 (v2 신규)
+// MARK: - 검색 화면 (v4 — tvOS 네이티브 패턴)
 //
-// 기획서 v2 3.2 — 클라이언트 사이드 필터링 기반.
-// 전체 카테고리의 라이브를 메모리에 적재 후 nick/title 필터링.
-// 최근 검색어는 UserDefaults에 저장 (최대 10개).
+// tvOS에서 UISearchBar를 view에 직접 add하면 키보드가 뜨지 않는다.
+// 표준 패턴: `UISearchContainerViewController` + `UISearchController` 조합.
+//   - UISearchContainerViewController가 큰 검색 입력 영역 + tvOS 키보드를 제공
+//   - UISearchController의 searchResultsController로 결과 VC를 연결
+//   - 결과 VC는 UISearchResultsUpdating을 구현하여 입력에 따라 필터링
+//
+// 비즈니스 로직 (allBroadcasts 풀, recentQueries, 셀 선택 → 재생)은 SearchResultsViewController로 이동.
 
 final class SearchViewController: UIViewController {
 
-    private var headerView: SectionHeaderView!
-    private var searchBar: UISearchBar!
+    private let resultsVC = SearchResultsViewController()
+    private var searchController: UISearchController!
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = DS.Colors.background
+        title = "검색"
+
+        searchController = UISearchController(searchResultsController: resultsVC)
+        searchController.searchResultsUpdater = resultsVC
+        searchController.searchBar.placeholder = "BJ 닉네임 또는 방송 제목"
+        searchController.obscuresBackgroundDuringPresentation = false
+        // 결과 VC가 칩 탭 시 검색바 텍스트를 갱신할 수 있도록 콜백 연결
+        resultsVC.onRequestQuery = { [weak self] q in
+            self?.searchController.searchBar.text = q
+            self?.searchController.isActive = true
+        }
+
+        let containerVC = UISearchContainerViewController(searchController: searchController)
+        containerVC.title = "검색"
+
+        addChild(containerVC)
+        view.addSubview(containerVC.view)
+        containerVC.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            containerVC.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            containerVC.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            containerVC.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            containerVC.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        containerVC.didMove(toParent: self)
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses where press.type == .playPause {
+            resultsVC.reloadPool()
+            ToastView.show(in: view, message: "검색 풀 새로고침 중...", duration: 1.2)
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
+}
+
+// MARK: - 검색 결과 VC
+
+final class SearchResultsViewController: UIViewController {
+
+    /// 칩 탭 시 부모(SearchViewController)에 검색바 텍스트 갱신을 요청하는 콜백
+    var onRequestQuery: ((String) -> Void)?
+
     private var recentBox: UIStackView!
     private var resultsCollectionView: UICollectionView!
     private var emptyLabel: UILabel!
@@ -17,32 +69,17 @@ final class SearchViewController: UIViewController {
     private var allBroadcasts: [LiveBroadcast] = []
     private var filtered: [LiveBroadcast] = []
     private var recentQueries: [String] = []
-
     private var hasLoadedAll = false
-    private var loadingOverlay: LoadingOverlayView?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = DS.Colors.background
-        title = "검색"
         loadRecentQueries()
         setupUI()
         loadAllBroadcasts()
     }
 
     private func setupUI() {
-        headerView = SectionHeaderView(title: "검색", subtitle: "BJ 닉네임 또는 방송 제목으로 찾기")
-        view.addSubview(headerView)
-
-        // v3: tvOS 17은 navigationItem.searchController 미지원 → UISearchBar 그대로 사용
-        // (tvOS native UX는 UISearchBar + 큰 입력 영역으로 잘 동작)
-        searchBar = UISearchBar()
-        searchBar.placeholder = "검색어를 입력하세요"
-        searchBar.searchBarStyle = .minimal
-        searchBar.delegate = self
-        searchBar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(searchBar)
-
         recentBox = UIStackView()
         recentBox.axis = .horizontal
         recentBox.spacing = DS.Spacing.sm
@@ -81,16 +118,7 @@ final class SearchViewController: UIViewController {
         view.addSubview(emptyLabel)
 
         NSLayoutConstraint.activate([
-            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DS.Layout.headerTopOffset),
-            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Layout.contentSideMargin),
-            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DS.Layout.contentSideMargin),
-
-            searchBar.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: DS.Spacing.md),
-            searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Layout.contentSideMargin),
-            searchBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DS.Layout.contentSideMargin),
-            searchBar.heightAnchor.constraint(equalToConstant: 64),
-
-            recentBox.topAnchor.constraint(equalTo: searchBar.bottomAnchor, constant: DS.Spacing.sm),
+            recentBox.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DS.Spacing.md),
             recentBox.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Layout.contentSideMargin),
             recentBox.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DS.Layout.contentSideMargin),
             recentBox.heightAnchor.constraint(equalToConstant: 50),
@@ -109,25 +137,20 @@ final class SearchViewController: UIViewController {
         refreshRecentBox()
     }
 
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        for press in presses where press.type == .playPause {
-            hasLoadedAll = false
-            loadAllBroadcasts()
-            ToastView.show(in: view, message: "검색 풀 새로고침 중...", duration: 1.2)
-            return
-        }
-        super.pressesBegan(presses, with: event)
+    /// 외부에서 호출 — Play/Pause 새로고침
+    func reloadPool() {
+        hasLoadedAll = false
+        loadAllBroadcasts()
     }
 
     private func loadAllBroadcasts() {
-        // 상위 5개 카테고리의 방송을 머지해서 검색 풀로 사용
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self, case .success(let cats) = result else { return }
                 let group = DispatchGroup()
                 var combined: [LiveBroadcast] = []
                 let queue = DispatchQueue(label: "search.merge")
-                // v3.2: 상위 15개 카테고리로 확장 — 검색 풀 커버리지 개선
+                // 상위 15개 카테고리의 라이브를 머지하여 검색 풀로 사용
                 for cat in cats.prefix(15) {
                     group.enter()
                     SOOPAPIClient.shared.fetchBroadcasts(byCategory: cat.code) { res in
@@ -179,7 +202,7 @@ final class SearchViewController: UIViewController {
             for q in recentQueries.prefix(6) {
                 let chip = RecentChipButton(query: q)
                 chip.onTap = { [weak self] query in
-                    self?.searchBar.text = query
+                    self?.onRequestQuery?(query)
                     self?.runSearch(query)
                 }
                 recentBox.addArrangedSubview(chip)
@@ -208,20 +231,20 @@ final class SearchViewController: UIViewController {
             emptyLabel.text = "\"\(query)\"에 대한 결과가 없습니다"
         }
         resultsCollectionView.reloadData()
-        addRecent(query)
+        // 2글자 이상의 명시적 검색만 최근 검색어로 저장
+        if query.count >= 2 { addRecent(query) }
     }
 }
 
-extension SearchViewController: UISearchBarDelegate {
-    func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
-        runSearch(searchBar.text ?? "")
-    }
-    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
-        // tvOS 리모컨 키패드는 입력이 한 글자씩 들어와도 비교적 빠름.
-        // v3.1: 2글자 이상이면 즉시 필터링하여 인터랙티브하게 결과 갱신.
-        if searchText.count >= 2 {
-            runSearch(searchText)
-        } else if searchText.isEmpty {
+// MARK: - UISearchResultsUpdating
+
+extension SearchResultsViewController: UISearchResultsUpdating {
+    func updateSearchResults(for searchController: UISearchController) {
+        let text = searchController.searchBar.text ?? ""
+        // tvOS 검색 키보드는 한 글자씩 들어옴 — 1글자는 너무 광범위하므로 2글자 이상에서 필터링
+        if text.count >= 2 {
+            runSearch(text)
+        } else if text.isEmpty {
             filtered = []
             emptyLabel.isHidden = false
             emptyLabel.text = "검색어를 입력해 보세요"
@@ -230,7 +253,9 @@ extension SearchViewController: UISearchBarDelegate {
     }
 }
 
-extension SearchViewController: UICollectionViewDataSource, UICollectionViewDelegate {
+// MARK: - Collection View
+
+extension SearchResultsViewController: UICollectionViewDataSource, UICollectionViewDelegate {
     func collectionView(_ cv: UICollectionView, numberOfItemsInSection section: Int) -> Int { filtered.count }
     func collectionView(_ cv: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = cv.dequeueReusableCell(withReuseIdentifier: "cell", for: indexPath) as! LiveBroadcastCell

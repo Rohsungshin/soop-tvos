@@ -57,6 +57,9 @@ final class HomeViewController: UIViewController {
         tableView.backgroundColor = DS.Colors.background
         tableView.dataSource = self
         tableView.delegate = self
+        // v4: 행 자체를 선택/포커스 대상으로 만들지 않는다 — 안쪽 캐러셀 카드가 포커스 타깃
+        tableView.allowsSelection = false
+        tableView.allowsFocus = false
         tableView.register(CarouselRowCell.self, forCellReuseIdentifier: "carousel")
         tableView.register(FavoritesCarouselCell.self, forCellReuseIdentifier: "favCarousel")
         tableView.estimatedRowHeight = 360
@@ -327,6 +330,10 @@ final class FavoritesCarouselCell: UITableViewCell {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // v4: 행 셀이 포커스를 흡수하지 않도록 — 안쪽 카드가 직접 포커스를 받게 한다
+    override var canBecomeFocused: Bool { false }
+    override var preferredFocusEnvironments: [UIFocusEnvironment] { [collectionView] }
 
     func configure(title: String, favorites: [FavoriteBJ], onSelect: ((FavoriteBJ) -> Void)?) {
         titleLabel.text = title
