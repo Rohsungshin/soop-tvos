@@ -5,6 +5,12 @@ import AVKit
 //
 // 카테고리 코드(예: "00040019" LoL)를 받아 `categoryContentsList` API로
 // 해당 카테고리의 라이브 방송을 가져온다.
+//
+// UI v2 — DesignSystem 기반:
+//  • 헤더: "← {카테고리명}" + "{n}개 방송 진행 중"
+//  • 새로고침 버튼 제거
+//  • 카드 400x282, 16:9 썸네일 + 정보 영역 분리
+//  • 모달 alert 대신 인라인 로딩 오버레이
 
 final class LiveListViewController: UIViewController {
 
@@ -16,10 +22,13 @@ final class LiveListViewController: UIViewController {
     private var broadcasts: [LiveBroadcast] = []
     private var collectionView: UICollectionView!
     private var statusLabel: UILabel!
+    private var headerView: SectionHeaderView!
+    private var loadingOverlay: LoadingOverlayView?
+    private var skeletonView: LoadingSkeletonView?
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        view.backgroundColor = DS.Colors.background
         title = categoryTitle
         print("[LiveList] viewDidLoad cate=\(categoryCode) title=\(categoryTitle)")
         setupUI()
@@ -37,44 +46,33 @@ final class LiveListViewController: UIViewController {
     }
 
     private func setupUI() {
-        let header = UILabel()
-        header.text = "📺 \(categoryTitle)"
-        header.textColor = .white
-        header.font = UIFont.systemFont(ofSize: 56, weight: .bold)
-        header.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(header)
-
-        // 새로고침 버튼 (우측 상단)
-        let refreshBtn = UIButton(type: .system)
-        refreshBtn.setTitle("🔄 새로고침", for: .normal)
-        refreshBtn.titleLabel?.font = UIFont.systemFont(ofSize: 24, weight: .semibold)
-        refreshBtn.setTitleColor(.white, for: .normal)
-        refreshBtn.backgroundColor = UIColor(white: 0.15, alpha: 1)
-        refreshBtn.layer.cornerRadius = 16
-        refreshBtn.contentEdgeInsets = UIEdgeInsets(top: 14, left: 28, bottom: 14, right: 28)
-        refreshBtn.translatesAutoresizingMaskIntoConstraints = false
-        refreshBtn.addTarget(self, action: #selector(refreshTapped), for: .primaryActionTriggered)
-        view.addSubview(refreshBtn)
+        // "←" 단서를 포함한 카테고리 헤더 + 진행 중 방송 개수
+        headerView = SectionHeaderView(
+            title: "← \(categoryTitle)",
+            subtitle: "방송 불러오는 중...",
+            titleFont: DS.Typography.title
+        )
+        view.addSubview(headerView)
 
         statusLabel = UILabel()
         statusLabel.text = "방송 불러오는 중..."
-        statusLabel.textColor = .lightGray
-        statusLabel.font = UIFont.systemFont(ofSize: 26)
+        statusLabel.textColor = DS.Colors.textSecondary
+        statusLabel.font = DS.Typography.body
         statusLabel.textAlignment = .center
         statusLabel.numberOfLines = 0
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
 
-        // 1080p TV — 카드 380x290, 행당 4장 (380*4 + 30*3 + 80*2 = 1770)
+        // 카드 400x282, 4열 (400*4 + 24*3 + 64*2 = 1800, 화면 1920에 양옆 60pt 여유)
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .vertical
-        layout.itemSize = CGSize(width: 380, height: 290)
-        layout.minimumInteritemSpacing = 30
-        layout.minimumLineSpacing = 40
-        layout.sectionInset = UIEdgeInsets(top: 40, left: 80, bottom: 80, right: 80)
+        layout.itemSize = DS.CardSize.broadcast
+        layout.minimumInteritemSpacing = DS.Spacing.md
+        layout.minimumLineSpacing = DS.Spacing.lg
+        layout.sectionInset = UIEdgeInsets(top: 32, left: DS.Spacing.xl, bottom: 72, right: DS.Spacing.xl)
 
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
-        collectionView.backgroundColor = .black
+        collectionView.backgroundColor = DS.Colors.background
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(LiveBroadcastCell.self, forCellWithReuseIdentifier: "cell")
@@ -83,31 +81,26 @@ final class LiveListViewController: UIViewController {
         view.addSubview(collectionView)
 
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 80),
-
-            refreshBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            refreshBtn.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -80),
+            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
+            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Spacing.xl),
+            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DS.Spacing.xl),
 
             statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 60),
             statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -60),
 
-            collectionView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 20),
+            collectionView.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 24),
             collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
 
-    @objc private func refreshTapped() {
-        loadBroadcasts()
-    }
-
     private func loadBroadcasts() {
         statusLabel.isHidden = false
         statusLabel.text = "방송 불러오는 중..."
+        headerView.setSubtitle("방송 불러오는 중...")
         SOOPAPIClient.shared.fetchBroadcasts(byCategory: categoryCode) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -115,15 +108,18 @@ final class LiveListViewController: UIViewController {
                 case .success(let list):
                     self.broadcasts = list
                     if list.isEmpty {
-                        self.statusLabel.text = "현재 라이브 중인 방송이 없습니다.\n\nPlay/Pause로 새로고침"
+                        self.statusLabel.text = "현재 라이브 중인 방송이 없습니다.\nPlay/Pause로 새로고침"
+                        self.headerView.setSubtitle("방송이 없습니다")
                     } else {
                         self.statusLabel.isHidden = true
+                        self.headerView.setSubtitle("\(list.count)개 방송 진행 중")
                     }
                     self.collectionView.reloadData()
                     self.setNeedsFocusUpdate()
                     self.updateFocusIfNeeded()
                 case .failure(let err):
                     self.statusLabel.text = "오류: \(err)\n\nPlay/Pause로 재시도"
+                    self.headerView.setSubtitle("로드 실패")
                 }
             }
         }
@@ -135,6 +131,17 @@ final class LiveListViewController: UIViewController {
             return
         }
         super.pressesBegan(presses, with: event)
+    }
+
+    // MARK: 인라인 로딩 오버레이 — 공용 LoadingOverlayView 사용
+    private func showLoadingOverlay(message: String) {
+        hideLoadingOverlay()
+        loadingOverlay = LoadingOverlayView.show(in: view, message: message)
+    }
+
+    private func hideLoadingOverlay() {
+        loadingOverlay?.dismiss()
+        loadingOverlay = nil
     }
 }
 
@@ -156,26 +163,23 @@ extension LiveListViewController: UICollectionViewDataSource, UICollectionViewDe
     }
 
     private func presentPlayer(for bc: LiveBroadcast) {
-        let loading = UIAlertController(title: "방송 연결 중...", message: bc.bjNick, preferredStyle: .alert)
-        present(loading, animated: false)
+        showLoadingOverlay(message: "\(bc.bjNick) 방송 연결 중...")
 
         SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo) { [weak self] result in
             DispatchQueue.main.async {
-                loading.dismiss(animated: false) {
-                    switch result {
-                    case .success(let info):
-                        let player = PlayerViewController()
-                        player.streamInfo = info
-                        player.modalPresentationStyle = .fullScreen
-                        self?.present(player, animated: true)
-                    case .failure(let err):
-                        let alert = UIAlertController(
-                            title: "재생 실패",
-                            message: "\(err)",
-                            preferredStyle: .alert)
-                        alert.addAction(UIAlertAction(title: "확인", style: .default))
-                        self?.present(alert, animated: true)
-                    }
+                guard let self = self else { return }
+                self.hideLoadingOverlay()
+                switch result {
+                case .success(let info):
+                    // v3: 최근 시청 기록
+                    RecentWatchStore.shared.save(bc)
+                    let player = PlayerViewController()
+                    player.streamInfo = info
+                    player.posterThumbnailURL = bc.thumbnailURL
+                    player.modalPresentationStyle = .fullScreen
+                    self.present(player, animated: true)
+                case .failure:
+                    ToastView.show(in: self.view, message: "재생할 수 없습니다", duration: 1.8)
                 }
             }
         }
@@ -184,6 +188,9 @@ extension LiveListViewController: UICollectionViewDataSource, UICollectionViewDe
 
 // MARK: - Cell
 
+/// 라이브 방송 카드 — 400x282
+///   · 썸네일 400x225 (16:9), 좌상단 LIVE, 우상단 시청자수
+///   · 정보 영역 57pt: 제목 22pt(2줄) + BJ 16pt
 final class LiveBroadcastCell: UICollectionViewCell {
 
     private let imageView = UIImageView()
@@ -191,7 +198,6 @@ final class LiveBroadcastCell: UICollectionViewCell {
     private let bjLabel = UILabel()
     private let viewerLabel = UILabel()
     private let liveBadge = UILabel()
-    private var imageTask: URLSessionDataTask?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -200,43 +206,47 @@ final class LiveBroadcastCell: UICollectionViewCell {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setupViews() {
-        contentView.backgroundColor = UIColor(white: 0.08, alpha: 1)
-        contentView.layer.cornerRadius = 14
+        contentView.backgroundColor = DS.Colors.surface
+        contentView.layer.cornerRadius = DS.Corner.card
         contentView.layer.masksToBounds = true
+        layer.masksToBounds = false
 
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
-        imageView.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        imageView.backgroundColor = DS.Colors.skeleton
         imageView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(imageView)
 
-        liveBadge.text = " ● LIVE "
-        liveBadge.textColor = .white
-        liveBadge.backgroundColor = UIColor(red: 0.95, green: 0.15, blue: 0.15, alpha: 1)
-        liveBadge.font = UIFont.systemFont(ofSize: 14, weight: .bold)
+        // LIVE 배지 — 좌상단
+        liveBadge.text = "  ● LIVE  "
+        liveBadge.textColor = DS.Colors.textPrimary
+        liveBadge.backgroundColor = DS.Colors.live
+        liveBadge.font = DS.Typography.badge
         liveBadge.textAlignment = .center
-        liveBadge.layer.cornerRadius = 4
+        liveBadge.layer.cornerRadius = DS.Corner.badge
         liveBadge.layer.masksToBounds = true
         liveBadge.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(liveBadge)
 
-        viewerLabel.textColor = .white
-        viewerLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-        viewerLabel.backgroundColor = UIColor(white: 0, alpha: 0.7)
+        // 시청자수 — 우상단
+        viewerLabel.textColor = DS.Colors.textPrimary
+        viewerLabel.font = DS.Typography.badge
+        viewerLabel.backgroundColor = DS.Colors.viewerBadgeBackground
         viewerLabel.textAlignment = .center
-        viewerLabel.layer.cornerRadius = 4
+        viewerLabel.layer.cornerRadius = DS.Corner.badge
         viewerLabel.layer.masksToBounds = true
         viewerLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(viewerLabel)
 
-        titleLabel.textColor = .white
-        titleLabel.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textColor = DS.Colors.textPrimary
+        titleLabel.font = DS.Typography.cardTitleLarge
         titleLabel.numberOfLines = 2
+        titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(titleLabel)
 
-        bjLabel.textColor = .lightGray
-        bjLabel.font = UIFont.systemFont(ofSize: 14)
+        bjLabel.textColor = DS.Colors.textSecondary
+        bjLabel.font = DS.Typography.caption
         bjLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(bjLabel)
 
@@ -244,59 +254,45 @@ final class LiveBroadcastCell: UICollectionViewCell {
             imageView.topAnchor.constraint(equalTo: contentView.topAnchor),
             imageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            imageView.heightAnchor.constraint(equalToConstant: 213),
+            imageView.heightAnchor.constraint(equalToConstant: 225),
 
             liveBadge.topAnchor.constraint(equalTo: imageView.topAnchor, constant: 12),
             liveBadge.leadingAnchor.constraint(equalTo: imageView.leadingAnchor, constant: 12),
-            liveBadge.heightAnchor.constraint(equalToConstant: 24),
+            liveBadge.heightAnchor.constraint(equalToConstant: 26),
 
             viewerLabel.topAnchor.constraint(equalTo: imageView.topAnchor, constant: 12),
             viewerLabel.trailingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: -12),
-            viewerLabel.heightAnchor.constraint(equalToConstant: 24),
-            viewerLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 50),
+            viewerLabel.heightAnchor.constraint(equalToConstant: 26),
+            viewerLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
 
-            titleLabel.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 10),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            titleLabel.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 12),
+            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: DS.Spacing.sm),
+            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -DS.Spacing.sm),
 
-            bjLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            bjLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            bjLabel.topAnchor.constraint(greaterThanOrEqualTo: titleLabel.bottomAnchor, constant: 4),
+            bjLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: DS.Spacing.sm),
+            bjLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -DS.Spacing.sm),
+            bjLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
         ])
     }
 
     func configure(with bc: LiveBroadcast) {
         titleLabel.text = bc.title
         bjLabel.text = bc.bjNick
-        viewerLabel.text = bc.viewerCount > 0 ? " \(formatViewers(bc.viewerCount)) " : ""
-        viewerLabel.isHidden = bc.viewerCount == 0
-        imageView.image = nil
-        imageTask?.cancel()
-        if let url = bc.thumbnailURL {
-            imageTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                guard let data = data, let img = UIImage(data: data) else { return }
-                DispatchQueue.main.async { self?.imageView.image = img }
-            }
-            imageTask?.resume()
+        if bc.viewerCount > 0 {
+            viewerLabel.text = "  \(bc.viewerCount.koreanCount()) 시청  "
+            viewerLabel.isHidden = false
+        } else {
+            viewerLabel.isHidden = true
         }
-    }
-
-    private func formatViewers(_ n: Int) -> String {
-        if n >= 10000 { return String(format: "%.1f만", Double(n)/10000) }
-        return "\(n)"
+        imageView.loadImage(from: bc.thumbnailURL)
     }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                 with coordinator: UIFocusAnimationCoordinator) {
         coordinator.addCoordinatedAnimations { [weak self] in
             guard let self = self else { return }
-            if self.isFocused {
-                self.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
-                self.contentView.layer.borderColor = UIColor.white.cgColor
-                self.contentView.layer.borderWidth = 4
-            } else {
-                self.transform = .identity
-                self.contentView.layer.borderWidth = 0
-            }
+            FocusEffect.apply(to: self, focused: self.isFocused)
         }
     }
 }

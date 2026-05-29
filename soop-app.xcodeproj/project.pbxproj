@@ -15,11 +15,15 @@
 		8001A7E733CFC611564364D5 /* SOOPAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F5960EEB8C7C5551269DEEA /* SOOPAPIClient.swift */; };
 		806EF8F5D9150EA72F120886 /* MyViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F244F8ED3D77ECF9075D0DF /* MyViewController.swift */; };
 		95B272DE78A9D8CB29B6A469 /* LiveCategoriesViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B712BBA5CC72A6B8802113CC /* LiveCategoriesViewController.swift */; };
+		C7B683ABADAEEBB48663010F /* SearchViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0446F9B64863622664FC4678 /* SearchViewController.swift */; };
 		D4C988CB2BE0AB0F4DEAAF5B /* PlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A35787DE9B43A4D119349551 /* PlayerViewController.swift */; };
+		E4470831D4953A203387A764 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB84F945F32A31385078D069 /* DesignSystem.swift */; };
+		EB8FAD131E73FD7AFAAC38C8 /* HomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CAAA9260F324A43BD2918AC /* HomeViewController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		00A208C259F1A14EC8DE351E /* soop-app.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "soop-app.entitlements"; sourceTree = "<group>"; };
+		0446F9B64863622664FC4678 /* SearchViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchViewController.swift; sourceTree = "<group>"; };
 		1F5960EEB8C7C5551269DEEA /* SOOPAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOPAPIClient.swift; sourceTree = "<group>"; };
 		2568234AD72D7C205D3C7958 /* LiveListViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveListViewController.swift; sourceTree = "<group>"; };
 		5D952DA431EA5FEF91B356C2 /* soop-app.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "soop-app.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -27,8 +31,10 @@
 		7F244F8ED3D77ECF9075D0DF /* MyViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyViewController.swift; sourceTree = "<group>"; };
 		8844762210C5262610FE7738 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8941AC06A65AC53305B588E7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8CAAA9260F324A43BD2918AC /* HomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewController.swift; sourceTree = "<group>"; };
 		A35787DE9B43A4D119349551 /* PlayerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerViewController.swift; sourceTree = "<group>"; };
 		AA39C3812075BCD663740327 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		AB84F945F32A31385078D069 /* DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystem.swift; sourceTree = "<group>"; };
 		B712BBA5CC72A6B8802113CC /* LiveCategoriesViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCategoriesViewController.swift; sourceTree = "<group>"; };
 		C734E25326258F44C0409BDB /* RootTabBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabBarController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -47,13 +53,16 @@
 			children = (
 				AA39C3812075BCD663740327 /* AppDelegate.swift */,
 				8941AC06A65AC53305B588E7 /* Assets.xcassets */,
+				AB84F945F32A31385078D069 /* DesignSystem.swift */,
 				5DF3C5A4ECA2E26683B4B67D /* ExploreViewController.swift */,
+				8CAAA9260F324A43BD2918AC /* HomeViewController.swift */,
 				8844762210C5262610FE7738 /* Info.plist */,
 				B712BBA5CC72A6B8802113CC /* LiveCategoriesViewController.swift */,
 				2568234AD72D7C205D3C7958 /* LiveListViewController.swift */,
 				7F244F8ED3D77ECF9075D0DF /* MyViewController.swift */,
 				A35787DE9B43A4D119349551 /* PlayerViewController.swift */,
 				C734E25326258F44C0409BDB /* RootTabBarController.swift */,
+				0446F9B64863622664FC4678 /* SearchViewController.swift */,
 				00A208C259F1A14EC8DE351E /* soop-app.entitlements */,
 				1F5960EEB8C7C5551269DEEA /* SOOPAPIClient.swift */,
 			);
@@ -163,13 +172,16 @@
 			buildActionMask = 2147483647;
 			files = (
 				184967B6CE4154F3B9E35BAE /* AppDelegate.swift in Sources */,
+				E4470831D4953A203387A764 /* DesignSystem.swift in Sources */,
 				66841800A64E87FE763B368F /* ExploreViewController.swift in Sources */,
+				EB8FAD131E73FD7AFAAC38C8 /* HomeViewController.swift in Sources */,
 				95B272DE78A9D8CB29B6A469 /* LiveCategoriesViewController.swift in Sources */,
 				05B3B8913BD930CC3B9733AE /* LiveListViewController.swift in Sources */,
 				806EF8F5D9150EA72F120886 /* MyViewController.swift in Sources */,
 				D4C988CB2BE0AB0F4DEAAF5B /* PlayerViewController.swift in Sources */,
 				29603C9AE2911E0A99BAA4D2 /* RootTabBarController.swift in Sources */,
 				8001A7E733CFC611564364D5 /* SOOPAPIClient.swift in Sources */,
+				C7B683ABADAEEBB48663010F /* SearchViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -5,83 +5,72 @@ import UIKit
 // `sch.sooplive.com/api.php?m=categoryList`로 모든 카테고리(500+개)를 가져와서
 // 시청자수 기준 내림차순으로 표시. 사용자가 카테고리 선택 시 LiveListVC로 push하면서
 // 해당 cate_no를 전달.
+//
+// UI v2 — DesignSystem 기반:
+//  • 헤더: 이모지 제거, "LIVE" + 서브타이틀
+//  • 새로고침 버튼 제거, Play/Pause 키 안내 푸터
+//  • 카드 320x220, 16:8.5 이미지 + 정보 영역 분리
+//  • 빨간 시청자 배지 → 흰 텍스트 + 노란 점
 
 final class LiveCategoriesViewController: UIViewController {
 
     private var categories: [SOOPCategory] = []
     private var collectionView: UICollectionView!
     private var statusLabel: UILabel!
+    private var headerView: SectionHeaderView!
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        view.backgroundColor = DS.Colors.background
         title = "LIVE"
         setupUI()
         loadCategories()
     }
 
     private func setupUI() {
-        let header = UILabel()
-        header.text = "📺 LIVE"
-        header.textColor = .white
-        header.font = UIFont.systemFont(ofSize: 56, weight: .bold)
-        header.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(header)
-
-        // 새로고침 버튼 (우측 상단)
-        let refreshBtn = UIButton(type: .system)
-        refreshBtn.setTitle("🔄 새로고침", for: .normal)
-        refreshBtn.titleLabel?.font = UIFont.systemFont(ofSize: 24, weight: .semibold)
-        refreshBtn.setTitleColor(.white, for: .normal)
-        refreshBtn.backgroundColor = UIColor(white: 0.15, alpha: 1)
-        refreshBtn.layer.cornerRadius = 16
-        refreshBtn.contentEdgeInsets = UIEdgeInsets(top: 14, left: 28, bottom: 14, right: 28)
-        refreshBtn.translatesAutoresizingMaskIntoConstraints = false
-        refreshBtn.addTarget(self, action: #selector(refreshTapped), for: .primaryActionTriggered)
-        view.addSubview(refreshBtn)
+        headerView = SectionHeaderView(title: "LIVE", subtitle: "실시간 인기 카테고리")
+        view.addSubview(headerView)
 
         statusLabel = UILabel()
         statusLabel.text = "카테고리 불러오는 중..."
-        statusLabel.textColor = .lightGray
-        statusLabel.font = UIFont.systemFont(ofSize: 26)
+        statusLabel.textColor = DS.Colors.textSecondary
+        statusLabel.font = DS.Typography.body
         statusLabel.textAlignment = .center
+        statusLabel.numberOfLines = 0
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
 
-        // 1080p TV 기준 — 화면 1920x1080, 행당 5장 ≈ 카드 320 + 간격
+        // 1080p TV — 카드 320x220, 5열 (320*5 + 24*4 + 64*2 = 1824, 화면 1920에 양옆 48pt 여유)
         let layout = UICollectionViewFlowLayout()
-        layout.itemSize = CGSize(width: 320, height: 240)
-        layout.minimumInteritemSpacing = 30
-        layout.minimumLineSpacing = 40
-        layout.sectionInset = UIEdgeInsets(top: 40, left: 80, bottom: 80, right: 80)
+        layout.itemSize = DS.CardSize.category
+        layout.minimumInteritemSpacing = DS.Spacing.md
+        layout.minimumLineSpacing = 32
+        layout.sectionInset = UIEdgeInsets(top: 32, left: DS.Spacing.xl, bottom: 72, right: DS.Spacing.xl)
 
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
-        collectionView.backgroundColor = .black
+        collectionView.backgroundColor = DS.Colors.background
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(CategoryCell.self, forCellWithReuseIdentifier: "cell")
+        collectionView.remembersLastFocusedIndexPath = true
         collectionView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(collectionView)
 
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 80),
-
-            refreshBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            refreshBtn.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -80),
+            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
+            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Spacing.xl),
+            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DS.Spacing.xl),
 
             statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 60),
+            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -60),
 
-            collectionView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 20),
+            collectionView.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 24),
             collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-    }
-
-    @objc private func refreshTapped() {
-        loadCategories()
     }
 
     private func loadCategories() {
@@ -94,6 +83,7 @@ final class LiveCategoriesViewController: UIViewController {
                 case .success(let cats):
                     self.categories = cats
                     self.statusLabel.isHidden = !cats.isEmpty
+                    self.headerView.setSubtitle("실시간 인기 카테고리 · \(cats.count)개")
                     self.collectionView.reloadData()
                     self.setNeedsFocusUpdate()
                     self.updateFocusIfNeeded()
@@ -133,13 +123,15 @@ extension LiveCategoriesViewController: UICollectionViewDataSource, UICollection
 
 // MARK: - Cell
 
+/// 카테고리 카드 — 상단 이미지 영역(320x170) + 하단 정보 영역(320x50)
 final class CategoryCell: UICollectionViewCell {
 
     private let imageView = UIImageView()
+    private let infoContainer = UIView()
     private let titleLabel = UILabel()
+    private let viewerStack = UIStackView()
+    private let viewerDot = UIView()
     private let viewerLabel = UILabel()
-    private let overlay = UIView()
-    private var imageTask: URLSessionDataTask?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -148,90 +140,87 @@ final class CategoryCell: UICollectionViewCell {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setupViews() {
-        contentView.layer.cornerRadius = 16
+        contentView.layer.cornerRadius = DS.Corner.card
         contentView.layer.masksToBounds = true
-        contentView.backgroundColor = UIColor(white: 0.1, alpha: 1)
+        contentView.backgroundColor = DS.Colors.surface
+
+        // 그림자는 contentView 클리핑 밖이라 layer에 직접
+        layer.masksToBounds = false
 
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
-        imageView.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        imageView.backgroundColor = DS.Colors.skeleton
         imageView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(imageView)
 
-        overlay.backgroundColor = UIColor(white: 0, alpha: 0.55)
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(overlay)
+        infoContainer.backgroundColor = DS.Colors.surface
+        infoContainer.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(infoContainer)
 
-        titleLabel.textColor = .white
-        titleLabel.font = UIFont.systemFont(ofSize: 22, weight: .bold)
-        titleLabel.textAlignment = .center
+        titleLabel.textColor = DS.Colors.textPrimary
+        titleLabel.font = DS.Typography.cardTitle
+        titleLabel.textAlignment = .left
         titleLabel.numberOfLines = 2
+        titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(titleLabel)
+        infoContainer.addSubview(titleLabel)
 
-        viewerLabel.textColor = .white
-        viewerLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
-        viewerLabel.textAlignment = .center
-        viewerLabel.backgroundColor = UIColor(red: 0.95, green: 0.2, blue: 0.2, alpha: 0.9)
-        viewerLabel.layer.cornerRadius = 4
-        viewerLabel.layer.masksToBounds = true
+        // 시청자수 스택 — ● 3.2만명 시청
+        viewerDot.backgroundColor = DS.Colors.viewerDot
+        viewerDot.layer.cornerRadius = 4
+        viewerDot.translatesAutoresizingMaskIntoConstraints = false
+
+        viewerLabel.textColor = DS.Colors.textPrimary
+        viewerLabel.font = DS.Typography.badge
         viewerLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(viewerLabel)
+
+        viewerStack.axis = .horizontal
+        viewerStack.spacing = 6
+        viewerStack.alignment = .center
+        viewerStack.translatesAutoresizingMaskIntoConstraints = false
+        infoContainer.addSubview(viewerStack)
+        viewerStack.addArrangedSubview(viewerDot)
+        viewerStack.addArrangedSubview(viewerLabel)
 
         NSLayoutConstraint.activate([
             imageView.topAnchor.constraint(equalTo: contentView.topAnchor),
             imageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            imageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            imageView.heightAnchor.constraint(equalToConstant: 170),
 
-            overlay.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            overlay.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            overlay.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            overlay.heightAnchor.constraint(equalToConstant: 80),
+            infoContainer.topAnchor.constraint(equalTo: imageView.bottomAnchor),
+            infoContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            infoContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            infoContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
 
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            titleLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
+            titleLabel.topAnchor.constraint(equalTo: infoContainer.topAnchor, constant: 8),
+            titleLabel.leadingAnchor.constraint(equalTo: infoContainer.leadingAnchor, constant: DS.Spacing.sm),
+            titleLabel.trailingAnchor.constraint(equalTo: infoContainer.trailingAnchor, constant: -DS.Spacing.sm),
 
-            viewerLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            viewerLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-            viewerLabel.heightAnchor.constraint(equalToConstant: 26),
-            viewerLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
+            viewerStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            viewerStack.leadingAnchor.constraint(equalTo: infoContainer.leadingAnchor, constant: DS.Spacing.sm),
+
+            viewerDot.widthAnchor.constraint(equalToConstant: 8),
+            viewerDot.heightAnchor.constraint(equalToConstant: 8),
         ])
     }
 
     func configure(with cat: SOOPCategory) {
         titleLabel.text = cat.name
-        viewerLabel.text = " ● \(formatViewers(cat.viewCount)) "
-        viewerLabel.isHidden = cat.viewCount == 0
-        imageView.image = nil
-        imageTask?.cancel()
-        if let url = cat.imageURL {
-            imageTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                guard let data = data, let img = UIImage(data: data) else { return }
-                DispatchQueue.main.async { self?.imageView.image = img }
-            }
-            imageTask?.resume()
+        if cat.viewCount > 0 {
+            viewerLabel.text = "\(cat.viewCount.koreanCount())명 시청 중"
+            viewerStack.isHidden = false
+        } else {
+            viewerStack.isHidden = true
         }
-    }
-
-    private func formatViewers(_ n: Int) -> String {
-        if n >= 10000 { return String(format: "%.1f만", Double(n)/10000) }
-        return "\(n)"
+        imageView.loadImage(from: cat.imageURL)
     }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                 with coordinator: UIFocusAnimationCoordinator) {
         coordinator.addCoordinatedAnimations { [weak self] in
             guard let self = self else { return }
-            if self.isFocused {
-                self.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
-                self.contentView.layer.borderColor = UIColor.white.cgColor
-                self.contentView.layer.borderWidth = 5
-            } else {
-                self.transform = .identity
-                self.contentView.layer.borderWidth = 0
-            }
+            FocusEffect.apply(to: self, focused: self.isFocused)
         }
     }
 }
