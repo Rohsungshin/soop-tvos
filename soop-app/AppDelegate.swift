@@ -14,6 +14,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         window.makeKeyAndVisible()
         self.window = window
 
+        // 자동 테스트 모드 — `--soop-selftest` 인자로 실행 시 스트림 해석/화질 검증만 수행.
+        if CommandLine.arguments.contains("--soop-selftest") {
+            SOOPAPIClient.shared.runSelfTest()
+            return true
+        }
+
         // .env 의 SOOP_ID / SOOP_PASSWORD 로 백그라운드 자동 로그인.
         // 성공 시 AuthTicket/UserTicket 쿠키가 HTTPCookieStorage 에 저장돼
         // 즐겨찾기·1080p 시도 같은 인증 필요한 API 호출에 자동 적용.

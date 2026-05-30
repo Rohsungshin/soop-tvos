@@ -112,6 +112,12 @@ final class SOOPAPIClient {
             let parts = pair.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 2 else { continue }
             let name = parts[0], value = parts[1]
+            // AbroadChk/AbroadVod 의 FAIL 값은 SOOP의 지역·연령 접근 차단 플래그이며 sticky 하다.
+            // 매 실행마다 이걸 주입하면 player_live_api.php 가 RESULT=-6 으로 막히므로 주입 제외.
+            if (name == "AbroadChk" || name == "AbroadVod"), value.uppercased().contains("FAIL") {
+                print("[SOOPAPI] skip injecting stale block flag \(name)=\(value)")
+                continue
+            }
             // sooplive.com 전체 도메인에 적용 (서브도메인 모두 포함)
             for domain in [".sooplive.com", "sooplive.com"] {
                 let props: [HTTPCookiePropertyKey: Any] = [
@@ -128,6 +134,45 @@ final class SOOPAPIClient {
             }
         }
         print("[SOOPAPI] injected \(injected) cookies from .env")
+    }
+
+    /// 로그인 세션 쿠키를 스트리밍 도메인(.sooplive.com)에 복제.
+    ///
+    /// 로그인은 login.sooplive.co.kr(.co.kr), 스트림 API는 live.sooplive.com(.com)으로
+    /// 등록 도메인이 달라 쿠키가 교차 전송되지 않는다. 그래서 로그인/연령확인된 세션이
+    /// player_live_api.php 에 전혀 도달하지 못해 RESULT=-6 이 나온다.
+    /// .sooplive.co.kr 에 저장된 쿠키를 .sooplive.com 으로 그대로 복제해 세션을 잇는다.
+    static func mirrorAuthCookiesToStreamingDomain() {
+        let store = HTTPCookieStorage.shared
+        guard let all = store.cookies else { return }
+        var mirrored = 0
+        for c in all where c.domain.contains("sooplive.co.kr") {
+            var props: [HTTPCookiePropertyKey: Any] = [
+                .name: c.name,
+                .value: c.value,
+                .domain: ".sooplive.com",
+                .path: "/",
+            ]
+            if let exp = c.expiresDate { props[.expires] = exp }
+            if c.isSecure { props[.secure] = "TRUE" }
+            if let cookie = HTTPCookie(properties: props) {
+                store.setCookie(cookie)
+                mirrored += 1
+            }
+        }
+        print("[SOOPAPI] mirrored \(mirrored) auth cookies .co.kr → .sooplive.com")
+    }
+
+    /// 앱이 .env로 심었거나 play 페이지가 찍은 stale 한 AbroadChk/AbroadVod=FAIL 쿠키 제거.
+    /// FAIL 은 sticky 해서 한번 박히면 이후 player_live_api.php 호출을 계속 막는다.
+    static func clearStaleAbroadFail() {
+        let store = HTTPCookieStorage.shared
+        for c in store.cookies ?? [] where (c.name == "AbroadChk" || c.name == "AbroadVod") {
+            if c.value.uppercased().contains("FAIL") {
+                store.deleteCookie(c)
+                print("[SOOPAPI] cleared stale \(c.name)=\(c.value) on \(c.domain)")
+            }
+        }
     }
 
     // MARK: - 네이티브 로그인 (login.sooplive.co.kr/app/LoginAction.php)
@@ -182,6 +227,8 @@ final class SOOPAPIClient {
                 // 쿠키 자동 저장 (URLSession이 HTTPCookieStorage.shared 사용 중)
                 let cookies = HTTPCookieStorage.shared.cookies?.filter { $0.domain.contains("sooplive") } ?? []
                 print("[SOOPAPI] login OK — \(cookies.count) cookies stored")
+                // 로그인 세션을 스트리밍 도메인(.sooplive.com)으로 복제
+                Self.mirrorAuthCookiesToStreamingDomain()
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .soopLoginSucceeded, object: nil)
                 }
@@ -549,6 +596,10 @@ final class SOOPAPIClient {
     func fetchStreamInfo(bjId: String, broadNo: String,
                         completion: @escaping (Result<StreamInfo, SOOPAPIError>) -> Void) {
         bootstrapCookies(forBJID: bjId, broadNo: broadNo) { [weak self] in
+            // play 페이지 방문이 AbroadChk=FAIL 을 찍을 수 있으므로 호출 직전에 제거하고,
+            // 로그인 세션이 .com 으로 확실히 복제돼 있도록 한 번 더 미러링한다.
+            Self.clearStaleAbroadFail()
+            Self.mirrorAuthCookiesToStreamingDomain()
             self?._fetchStreamInfo(bjId: bjId, broadNo: broadNo, completion: completion)
         }
     }
@@ -771,5 +822,61 @@ final class SOOPAPIClient {
         let range = NSRange(location: 0, length: ns.length)
         guard let m = re.firstMatch(in: text, range: range), m.numberOfRanges > 1 else { return nil }
         return ns.substring(with: m.range(at: 1))
+    }
+
+    // MARK: - 자동 테스트 하니스 (--soop-selftest 실행 인자로만 동작)
+    //
+    // 시뮬레이터에서 `xcrun simctl launch --console-pty ... --soop-selftest` 로 실행하면
+    // 환경변수 SOOP_TEST_BJID 의 방송에 대해 로그인 → 스트림 해석 → 1080p 변형 존재 여부까지
+    // 검사하고 `SELFTEST_RESULT:` 한 줄로 결과를 출력한다. UI 조작 없이 인증/화질 로직만 검증.
+    func runSelfTest() {
+        let bjId = (ProcessInfo.processInfo.environment["SOOP_TEST_BJID"] ?? "").trimmingCharacters(in: .whitespaces)
+        guard !bjId.isEmpty else {
+            Self.writeSelfTestResult("FAIL reason=no_bjid set_SOOP_TEST_BJID_env")
+            return
+        }
+        Self.writeSelfTestResult("RUNNING bjId=\(bjId)")
+        login { ok, err in
+            print("SELFTEST: login ok=\(ok) err=\(err ?? "-")")
+            self.fetchStreamInfo(bjId: bjId, broadNo: "0") { result in
+                let abroad = HTTPCookieStorage.shared.cookies?
+                    .first(where: { $0.name == "AbroadChk" })?.value ?? "(none)"
+                switch result {
+                case .success(let info):
+                    self.checkPlaylist1080(url: info.viewURL) { has1080, variants in
+                        Self.writeSelfTestResult("PASS_STREAM has1080=\(has1080) resolution=\(info.resolution) abroadChk=\(abroad) login=\(ok)\nVARIANTS: \(variants)")
+                    }
+                case .failure(let e):
+                    Self.writeSelfTestResult("FAIL_STREAM error=\(e) abroadChk=\(abroad) login=\(ok)")
+                }
+            }
+        }
+    }
+
+    /// 자동 테스트 결과를 앱 Documents/selftest_result.txt 에 기록 (stdout 캡처가 불안정하므로 파일 사용).
+    private static func writeSelfTestResult(_ line: String) {
+        print("SELFTEST_RESULT: \(line)")
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let url = dir.appendingPathComponent("selftest_result.txt")
+        try? line.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// 주어진 m3u8(또는 TS 마스터) URL을 받아 1080p 변형 포함 여부를 검사.
+    private func checkPlaylist1080(url: URL, completion: @escaping (Bool, String) -> Void) {
+        var req = URLRequest(url: url)
+        req.setValue("https://play.sooplive.com", forHTTPHeaderField: "Referer")
+        req.setValue("https://play.sooplive.com", forHTTPHeaderField: "Origin")
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        session.dataTask(with: req) { data, _, _ in
+            guard let data = data, let s = String(data: data, encoding: .utf8) else {
+                completion(false, "(no playlist body)")
+                return
+            }
+            let has1080 = s.contains("x1080") || s.contains(",1080") || s.lowercased().contains("1080p")
+            let resLines = s.split(separator: "\n")
+                .filter { $0.uppercased().contains("RESOLUTION") }
+                .joined(separator: " | ")
+            completion(has1080, resLines.isEmpty ? "(no RESOLUTION tags — media playlist)" : resLines)
+        }.resume()
     }
 }
