@@ -72,9 +72,14 @@ final class RootTabBarController: UITabBarController {
             .font: DS.Typography.subsection,
             .foregroundColor: DS.Colors.textPrimary,
         ]
+        // 포커스 시 시스템이 밝은 강조 배경을 그리므로, 흰 글자가 묻히지 않도록 어두운 색 사용
+        let focusedAttrs: [NSAttributedString.Key: Any] = [
+            .font: DS.Typography.subsection,
+            .foregroundColor: DS.Colors.background,
+        ]
         UITabBarItem.appearance().setTitleTextAttributes(normalAttrs, for: .normal)
         UITabBarItem.appearance().setTitleTextAttributes(selectedAttrs, for: .selected)
-        UITabBarItem.appearance().setTitleTextAttributes(selectedAttrs, for: .focused)
+        UITabBarItem.appearance().setTitleTextAttributes(focusedAttrs, for: .focused)
 
         tabBar.barTintColor = DS.Colors.background
         tabBar.backgroundColor = DS.Colors.background
