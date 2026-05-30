@@ -231,8 +231,11 @@ final class SOOPAPIClient {
                 return
             }
             var favs: [FavoriteBJ] = []
+            var seenBJIDs = Set<String>()
             for f in list {
                 guard let bjId = f["user_id"] as? String, !bjId.isEmpty else { continue }
+                // 같은 BJ가 응답에 중복으로 들어오면 첫 항목만 사용
+                guard seenBJIDs.insert(bjId).inserted else { continue }
                 let nick = (f["user_nick"] as? String) ?? bjId
                 let isLive = (f["is_live"] as? Bool) ?? false
                 let station = (f["station_name"] as? String) ?? ""
