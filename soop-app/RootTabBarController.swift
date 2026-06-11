@@ -50,6 +50,12 @@ final class RootTabBarController: UITabBarController {
         selectedIndex = 0
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // 탭 콘텐츠 뷰는 viewDidLoad 이후에 추가되므로 레이아웃 시점마다 z-order 재보장
+        view.bringSubviewToFront(brandLabel)
+    }
+
     private func makeNav(root: UIViewController,
                          title: String,
                          image: UIImage?,
@@ -94,6 +100,7 @@ final class RootTabBarController: UITabBarController {
         brandLabel.font = UIFont.systemFont(ofSize: 32, weight: .heavy)
         brandLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(brandLabel)
+        view.bringSubviewToFront(brandLabel)
         NSLayoutConstraint.activate([
             brandLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DS.Spacing.xs),
             brandLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Spacing.md),

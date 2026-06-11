@@ -18,6 +18,7 @@ final class ExploreViewController: UIViewController {
 
     private var tableView: UITableView!
     private var headerView: SectionHeaderView!
+    private var errorStateView: ErrorStateView?
 
     private var popularCategories: [SOOPCategory] = []
     private var popularBroadcasts: [LiveBroadcast] = []
@@ -75,16 +76,52 @@ final class ExploreViewController: UIViewController {
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if case .success(let cats) = result {
+                switch result {
+                case .success(let cats):
+                    self.hideErrorState()
                     let top12 = Array(cats.prefix(12))
                     self.popularCategories = top12
                     self.tableView.reloadData()
                     // 인기 방송 — 상위 3개 카테고리 머지
                     let topForBroadcasts = Array(cats.prefix(3))
                     self.loadPopularBroadcasts(from: topForBroadcasts)
+                case .failure:
+                    // 로드 실패 — 오류 상태 뷰 + 재시도 (검색 진입 셀은 그대로 유지)
+                    self.showErrorState()
                 }
             }
         }
+    }
+
+    // MARK: 오류 상태 (카테고리 로드 실패)
+
+    private func showErrorState() {
+        hideErrorState()
+        let errorView = ErrorStateView(icon: "wifi.exclamationmark", title: "콘텐츠를 불러오지 못했습니다")
+        errorView.onRetry = { [weak self] in
+            guard let self = self else { return }
+            self.hideErrorState()
+            self.loadData()
+        }
+        view.addSubview(errorView)
+        NSLayoutConstraint.activate([
+            errorView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            errorView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        errorStateView = errorView
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+    }
+
+    private func hideErrorState() {
+        errorStateView?.removeFromSuperview()
+        errorStateView = nil
+    }
+
+    // 오류 상태 뷰가 떠 있으면 포커스를 "다시 시도" 버튼으로 보낸다
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let errorView = errorStateView { return [errorView] }
+        return super.preferredFocusEnvironments
     }
 
     private func loadPopularBroadcasts(from categories: [SOOPCategory]) {

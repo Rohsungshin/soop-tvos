@@ -70,6 +70,12 @@ final class SearchResultsViewController: UIViewController {
     private var filtered: [LiveBroadcast] = []
     private var recentQueries: [String] = []
     private var hasLoadedAll = false
+    /// 풀 로드 실패 기록 — 다음 검색 시도 시 자동 재로드 트리거
+    private var hasLoadFailed = false
+    /// 자동 재로드 진행 중 — 중복 재로드 방지
+    private var isReloading = false
+    /// 재로드 완료 후 이어서 실행할 검색어
+    private var pendingQuery: String?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -135,18 +141,33 @@ final class SearchResultsViewController: UIViewController {
         ])
 
         refreshRecentBox()
+        setEmptyStateVisible(true)
+    }
+
+    /// emptyLabel ↔ resultsCollectionView 상호 배타 표시 — 두 isHidden을 항상 함께 설정
+    private func setEmptyStateVisible(_ visible: Bool) {
+        emptyLabel.isHidden = !visible
+        resultsCollectionView.isHidden = visible
     }
 
     /// 외부에서 호출 — Play/Pause 새로고침
     func reloadPool() {
         hasLoadedAll = false
+        hasLoadFailed = false
+        isReloading = false
         loadAllBroadcasts()
     }
 
     private func loadAllBroadcasts() {
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self, case .success(let cats) = result else { return }
+                guard let self = self else { return }
+                guard case .success(let cats) = result else {
+                    // 실패 기록 — 다음 검색 시도 시 runSearch가 자동 재로드한다
+                    self.hasLoadFailed = true
+                    self.isReloading = false
+                    return
+                }
                 let group = DispatchGroup()
                 var combined: [LiveBroadcast] = []
                 let queue = DispatchQueue(label: "search.merge")
@@ -163,6 +184,15 @@ final class SearchResultsViewController: UIViewController {
                 group.notify(queue: .main) {
                     self.allBroadcasts = combined
                     self.hasLoadedAll = true
+                    self.hasLoadFailed = false
+                    // 자동 재로드 성공 — 마지막으로 시도한 검색어로 이어서 검색
+                    if self.isReloading {
+                        self.isReloading = false
+                        if let q = self.pendingQuery {
+                            self.pendingQuery = nil
+                            self.runSearch(q)
+                        }
+                    }
                 }
             }
         }
@@ -214,25 +244,64 @@ final class SearchResultsViewController: UIViewController {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if q.isEmpty {
             filtered = []
-            emptyLabel.isHidden = false
             emptyLabel.text = "검색어를 입력해 보세요"
+            setEmptyStateVisible(true)
             resultsCollectionView.reloadData()
             return
         }
         if !hasLoadedAll {
-            ToastView.show(in: view, message: "데이터 준비 중입니다. 잠시 후 다시 시도해 주세요", duration: 2.0)
+            // 아직 검색 가능한 풀이 없음 — 이전 결과 그리드를 비우고 빈 상태로 전환 (design §2-3)
+            filtered = []
+            resultsCollectionView.reloadData()
+            if isReloading {
+                // 재로드 진행 중 — 중복 재로드 없이 검색어만 갱신
+                pendingQuery = query
+                emptyLabel.text = "데이터를 다시 불러오고 있습니다"
+                ToastView.show(in: view, message: "데이터를 다시 불러오고 있습니다", duration: 2.0)
+            } else if hasLoadFailed {
+                // 풀 로드 실패 상태 — 검색 시도를 트리거로 자동 재로드
+                pendingQuery = query
+                isReloading = true
+                emptyLabel.text = "검색 데이터를 다시 불러옵니다"
+                ToastView.show(in: view, message: "검색 데이터를 다시 불러옵니다", duration: 2.0)
+                loadAllBroadcasts()
+            } else {
+                emptyLabel.text = "데이터 준비 중입니다. 잠시 후 다시 시도해 주세요"
+                ToastView.show(in: view, message: "데이터 준비 중입니다. 잠시 후 다시 시도해 주세요", duration: 2.0)
+            }
+            setEmptyStateVisible(true)
             return
         }
         filtered = allBroadcasts.filter {
             $0.bjNick.lowercased().contains(q) || $0.title.lowercased().contains(q)
         }
-        emptyLabel.isHidden = !filtered.isEmpty
         if filtered.isEmpty {
-            emptyLabel.text = "\"\(query)\"에 대한 결과가 없습니다"
+            // 결과 0건 — 검색 범위(상위 15개 카테고리) 안내를 함께 표시
+            emptyLabel.attributedText = noResultsText(for: query)
         }
+        setEmptyStateVisible(filtered.isEmpty)
         resultsCollectionView.reloadData()
         // 2글자 이상의 명시적 검색만 최근 검색어로 저장
         if query.count >= 2 { addRecent(query) }
+    }
+
+    /// 결과 0건 안내 — 1줄: 결과 없음 / 2줄: 검색 범위 안내
+    private func noResultsText(for query: String) -> NSAttributedString {
+        let text = NSMutableAttributedString(
+            string: "\"\(query)\"에 대한 결과가 없습니다\n",
+            attributes: [
+                .font: DS.Typography.subsection,
+                .foregroundColor: DS.Colors.textSecondary,
+            ]
+        )
+        text.append(NSAttributedString(
+            string: "인기 카테고리 상위 15개의 라이브 방송에서 검색한 결과입니다",
+            attributes: [
+                .font: DS.Typography.body,
+                .foregroundColor: DS.Colors.textTertiary,
+            ]
+        ))
+        return text
     }
 }
 
@@ -246,8 +315,8 @@ extension SearchResultsViewController: UISearchResultsUpdating {
             runSearch(text)
         } else if text.isEmpty {
             filtered = []
-            emptyLabel.isHidden = false
             emptyLabel.text = "검색어를 입력해 보세요"
+            setEmptyStateVisible(true)
             resultsCollectionView.reloadData()
         }
     }

@@ -561,6 +561,120 @@ final class LoadingSkeletonView: UIView {
     }
 }
 
+// MARK: - 공용 오류 상태 뷰 (v5 신규)
+
+/// 데이터 로드 실패 시 화면 중앙에 표시 — 아이콘 + 안내 문구(+ 보조 문구) + 포커스 가능한 "다시 시도" 버튼.
+/// HOME / 탐색 / MY 탭에서 공통 사용. 레이아웃은 MyViewController.showEmptyState()와 동일 구조.
+/// VC에서 centerX/centerY로 배치하고, preferredFocusEnvironments로 버튼에 포커스를 보낸다.
+final class ErrorStateView: UIView {
+
+    /// "다시 시도" 선택 시 호출. 연타 방지를 위해 첫 선택 시 버튼이 비활성화된다.
+    var onRetry: (() -> Void)?
+
+    private let retryButton: ErrorRetryButton
+
+    // MyViewController.showEmptyState()와 동일 확정값 — DS 토큰 없음 (디자인 명세 §4-4)
+    private static let errorIconSize: CGFloat = 80
+    private static let errorContainerMaxWidth: CGFloat = 720
+    private static let errorTitleSubtitleGap: CGFloat = 8
+
+    init(icon: String, title: String, subtitle: String? = nil) {
+        var btnConfig = UIButton.Configuration.filled()
+        btnConfig.baseBackgroundColor = DS.Colors.primary
+        btnConfig.baseForegroundColor = DS.Colors.textPrimary
+        btnConfig.contentInsets = DS.ButtonInsets.cta
+        btnConfig.cornerStyle = .fixed
+        btnConfig.background.cornerRadius = DS.Corner.button
+        btnConfig.attributedTitle = AttributedString("다시 시도", attributes: AttributeContainer([
+            .font: DS.Typography.cardTitle
+        ]))
+        retryButton = ErrorRetryButton(configuration: btnConfig)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let iconView = UIImageView(image: UIImage(systemName: icon))
+        iconView.tintColor = DS.Colors.textTertiary
+        iconView.contentMode = .scaleAspectFit
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iconView)
+
+        let titleLabel = UILabel()
+        titleLabel.text = title
+        titleLabel.textColor = DS.Colors.textPrimary
+        titleLabel.font = DS.Typography.subsection
+        titleLabel.textAlignment = .center
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleLabel)
+
+        // 포커스 보더가 버튼의 둥근 배경을 따라가도록
+        retryButton.layer.cornerRadius = DS.Corner.button
+        retryButton.translatesAutoresizingMaskIntoConstraints = false
+        retryButton.addTarget(self, action: #selector(retryTapped), for: .primaryActionTriggered)
+        addSubview(retryButton)
+
+        // 서브타이틀은 MY 탭처럼 조치 안내가 필요한 화면만 사용
+        var buttonTopAnchor = titleLabel.bottomAnchor
+        if let subtitle = subtitle {
+            let subtitleLabel = UILabel()
+            subtitleLabel.text = subtitle
+            subtitleLabel.textColor = DS.Colors.textSecondary
+            subtitleLabel.font = DS.Typography.body
+            subtitleLabel.textAlignment = .center
+            subtitleLabel.numberOfLines = 2
+            subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(subtitleLabel)
+            NSLayoutConstraint.activate([
+                subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: Self.errorTitleSubtitleGap),
+                subtitleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+                subtitleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+            buttonTopAnchor = subtitleLabel.bottomAnchor
+        }
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(lessThanOrEqualToConstant: Self.errorContainerMaxWidth),
+
+            iconView.topAnchor.constraint(equalTo: topAnchor),
+            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: Self.errorIconSize),
+            iconView.heightAnchor.constraint(equalToConstant: Self.errorIconSize),
+
+            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: DS.Spacing.md),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            retryButton.topAnchor.constraint(equalTo: buttonTopAnchor, constant: DS.Spacing.lg),
+            retryButton.centerXAnchor.constraint(equalTo: centerXAnchor),
+            retryButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// 오류 뷰 표시 직후 포커스가 "다시 시도" 버튼으로 가도록
+    override var preferredFocusEnvironments: [UIFocusEnvironment] { [retryButton] }
+
+    @objc private func retryTapped() {
+        // 연타 방지 — 재시도 시 뷰 자체가 제거/재표시되므로 재활성화는 불필요
+        retryButton.isEnabled = false
+        onRetry?()
+    }
+}
+
+/// ErrorStateView 전용 "다시 시도" 버튼 — 포커스 시 FocusEffect.applyBorder 적용
+private final class ErrorRetryButton: UIButton {
+    override var canBecomeFocused: Bool { true }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations { [weak self] in
+            guard let self = self else { return }
+            FocusEffect.applyBorder(to: self, focused: self.isFocused)
+        }
+    }
+}
+
 // MARK: - 이미지 캐시 + UIImageView extension (v2 신규)
 
 /// 메모리 + URLCache 기반 간단한 이미지 캐시.

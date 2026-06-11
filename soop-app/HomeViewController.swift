@@ -19,6 +19,7 @@ final class HomeViewController: UIViewController {
     private var tableView: UITableView!
     private var headerView: SectionHeaderView!
     private var skeletonView: LoadingSkeletonView?
+    private var errorStateView: ErrorStateView?
 
     private var popularLive: [LiveBroadcast] = []
     private var popularCategories: [SOOPCategory] = []
@@ -93,10 +94,6 @@ final class HomeViewController: UIViewController {
         ])
         sk.startAnimating()
         skeletonView = sk
-        // v3: 1.5초 timeout — 네트워크 지연 시에도 스켈레톤이 계속 깜빡이지 않게 강제 종료
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.hideSkeleton()
-        }
     }
 
     private func hideSkeleton() {
@@ -108,10 +105,18 @@ final class HomeViewController: UIViewController {
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if case .success(let cats) = result {
+                switch result {
+                case .success(let cats):
+                    // 카테고리 도착 즉시 스켈레톤 해제 — 스켈레톤 위 reloadData 방지
+                    self.hideSkeleton()
+                    self.hideErrorState()
                     self.popularCategories = Array(cats.prefix(6))
                     self.tableView.reloadData()
                     self.loadPopularLive(from: Array(cats.prefix(3)))
+                case .failure:
+                    // 실패 확정 — 스켈레톤 즉시 해제 후 오류 상태 뷰 표시
+                    self.hideSkeleton()
+                    self.showErrorState()
                 }
             }
         }
@@ -135,9 +140,43 @@ final class HomeViewController: UIViewController {
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
             self.popularLive = combined.sorted { $0.viewerCount > $1.viewerCount }.prefix(10).map { $0 }
-            self.hideSkeleton()
             self.tableView.reloadData()
         }
+    }
+
+    // MARK: 오류 상태 (카테고리 로드 실패)
+
+    private func showErrorState() {
+        hideErrorState()
+        let errorView = ErrorStateView(icon: "wifi.exclamationmark", title: "콘텐츠를 불러오지 못했습니다")
+        errorView.onRetry = { [weak self] in
+            guard let self = self else { return }
+            self.hideErrorState()
+            self.showSkeleton()
+            self.loadData()
+        }
+        view.addSubview(errorView)
+        NSLayoutConstraint.activate([
+            errorView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            errorView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        errorStateView = errorView
+        // 즐겨찾기/최근 시청 행이 오류 뷰와 겹치지 않게 콘텐츠는 숨긴다
+        tableView.isHidden = true
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+    }
+
+    private func hideErrorState() {
+        errorStateView?.removeFromSuperview()
+        errorStateView = nil
+        tableView.isHidden = false
+    }
+
+    // 오류 상태 뷰가 떠 있으면 포커스를 "다시 시도" 버튼으로 보낸다
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let errorView = errorStateView { return [errorView] }
+        return super.preferredFocusEnvironments
     }
 
     private func loadFavorites() {

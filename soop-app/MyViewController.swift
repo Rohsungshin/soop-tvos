@@ -25,6 +25,7 @@ final class MyViewController: UIViewController {
     private var collectionView: UICollectionView!
     private var headerView: SectionHeaderView!
     private var emptyStateView: UIView?
+    private var errorStateView: ErrorStateView?
     private var statusLabel: UILabel!
     private var loadingOverlay: LoadingOverlayView?
 
@@ -104,6 +105,7 @@ final class MyViewController: UIViewController {
         statusLabel.isHidden = false
         statusLabel.text = "즐겨찾기 불러오는 중..."
         hideEmptyState()
+        hideErrorState()
         SOOPAPIClient.shared.fetchFavorites { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -122,7 +124,8 @@ final class MyViewController: UIViewController {
                     self.setNeedsFocusUpdate()
                     self.updateFocusIfNeeded()
                 case .failure(let err):
-                    self.statusLabel.text = "로드 실패: \(err)\n\n로그인이 안 됐을 수 있습니다.\n(.env의 SOOP_ID/PASSWORD 확인)"
+                    self.statusLabel.isHidden = true
+                    self.showErrorState(for: err)
                 }
             }
         }
@@ -205,6 +208,49 @@ final class MyViewController: UIViewController {
     }
 
     @objc private func refreshTapped() { loadFavorites() }
+
+    // MARK: 오류 상태 (즐겨찾기 로드 실패)
+
+    private func showErrorState(for err: SOOPAPIError) {
+        hideErrorState()
+        // SOOPAPIError에 인증 전용 케이스가 없어, 로그인 쿠키(AuthTicket) 유무로
+        // 인증 오류와 네트워크/서버 오류를 구분한다
+        let isLoggedIn = HTTPCookieStorage.shared.cookies?.contains { $0.name == "AuthTicket" } ?? false
+        let errorView: ErrorStateView
+        if isLoggedIn {
+            errorView = ErrorStateView(
+                icon: "wifi.exclamationmark",
+                title: "즐겨찾기를 불러오지 못했습니다",
+                subtitle: "인터넷 연결을 확인하고 다시 시도해 주세요"
+            )
+        } else {
+            errorView = ErrorStateView(
+                icon: "person.crop.circle.badge.exclamationmark",
+                title: "로그인 정보를 확인할 수 없습니다",
+                subtitle: "SOOP 계정으로 로그인되어 있는지 확인해 주세요"
+            )
+        }
+        errorView.onRetry = { [weak self] in self?.loadFavorites() }
+        view.addSubview(errorView)
+        NSLayoutConstraint.activate([
+            errorView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            errorView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        errorStateView = errorView
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+    }
+
+    private func hideErrorState() {
+        errorStateView?.removeFromSuperview()
+        errorStateView = nil
+    }
+
+    // 오류 상태 뷰가 떠 있으면 포커스를 "다시 시도" 버튼으로 보낸다
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let errorView = errorStateView { return [errorView] }
+        return super.preferredFocusEnvironments
+    }
 
     // MARK: 인라인 로딩 오버레이 — 공용 LoadingOverlayView 사용
 
