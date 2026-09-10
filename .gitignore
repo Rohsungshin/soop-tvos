@@ -13,6 +13,8 @@ xcuserdata/
 # Credentials
 .env
 .env.bak
+.env.bak.*
+.env.*.bak
 *.env.backup
 
 # Claude Code local settings
