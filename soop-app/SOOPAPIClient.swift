@@ -32,8 +32,17 @@ struct FavoriteBJ {
     let nick: String
     let isLive: Bool
     let stationName: String
-    let totalViewCount: Int
+    /// **현재 시청자 수** (`broad_info[0].total_view_cnt`). 오프라인이면 0.
+    ///
+    /// 응답 최상위의 `total_view_cnt`는 이름과 달리 채널 **누적** 방문자 수다
+    /// (실측 2026-09-10: 어떤 BJ는 누적 45,813,776 / 현재 1,411). 그걸 카드에 쓰면
+    /// "4581.4만 시청"처럼 표시된다. `broad_info`의 값은 `pc_view_cnt + mobile_view_cnt`와
+    /// 같고 `chapi …/station`의 `current_sum_viewer`와도 12명 전원 일치했다.
+    let liveViewerCount: Int
     let lastBroadStart: String?
+    /// 라이브일 때 응답의 `broad_info`가 실어 주는 방송 썸네일(480x270).
+    /// 없으면 프로필 이미지로 대체한다.
+    let thumbnailURL: URL?
 }
 
 struct StreamInfo {
@@ -56,6 +65,10 @@ enum SOOPAPIError: Error {
     case notLive
     /// SOOP `RESULT=-6` — 19+ 방송에 인증 미통과. AbroadChk=FAIL 쿠키 보유 상태.
     case adultVerificationRequired
+    /// 비밀번호 방송(BPWD=Y)인데 비밀번호가 아직 입력되지 않음. UI에서 비번을 받아 재시도해야 함.
+    case passwordRequired
+    /// 비밀번호를 입력했으나 서버가 AID를 발급하지 않음(비번 불일치).
+    case passwordIncorrect
 }
 
 extension Notification.Name {
@@ -118,8 +131,9 @@ final class SOOPAPIClient {
                 print("[SOOPAPI] skip injecting stale block flag \(name)=\(value)")
                 continue
             }
-            // sooplive.com 전체 도메인에 적용 (서브도메인 모두 포함)
-            for domain in [".sooplive.com", "sooplive.com"] {
+            // 로그인·즐겨찾기 API는 sooplive.co.kr, 스트리밍/검색은 sooplive.com 이라
+            // 두 도메인 모두에 심어야 한다. (.co.kr 이 빠지면 myapi 호출에 쿠키가 실리지 않음)
+            for domain in [".sooplive.com", "sooplive.com", ".sooplive.co.kr", "sooplive.co.kr"] {
                 let props: [HTTPCookiePropertyKey: Any] = [
                     .name: name,
                     .value: value,
@@ -257,6 +271,21 @@ final class SOOPAPIClient {
         return Creds(id: id, pw: pw)
     }
 
+    // MARK: - 이미지 URL 규칙
+
+    /// BJ 프로필 이미지 URL.
+    ///
+    /// `stimg.sooplive.com/LOGO/<앞2자>/<bjId>/<bjId>.webp` 가 원본이고,
+    /// 경로 중간에 `/m/`을 끼우면 **100px 폭 소형 썸네일**이 나온다.
+    /// Apple TV 4K는 @2x로 그리므로(400pt 카드 = 800px) 100px 이미지는 크게 뭉개진다.
+    /// 실측(2026-09-10): `/m/` 변형 100x133 vs 원본 420x559 — 폭 기준 3~4배 차이.
+    /// webp가 jpg보다 크거나 같아(어떤 BJ는 2배) webp를 쓴다.
+    static func profileImageURL(bjId: String) -> URL? {
+        guard !bjId.isEmpty else { return nil }
+        let prefix = String(bjId.prefix(2))
+        return URL(string: "https://stimg.sooplive.com/LOGO/\(prefix)/\(bjId)/\(bjId).webp")
+    }
+
     // MARK: - 즐겨찾기 BJ 목록 (myapi.sooplive.co.kr/api/favorite)
 
     /// 로그인된 사용자의 즐겨찾기 BJ 목록 가져오기. 로그인 안 됐으면 빈 결과.
@@ -286,12 +315,23 @@ final class SOOPAPIClient {
                 let nick = (f["user_nick"] as? String) ?? bjId
                 let isLive = (f["is_live"] as? Bool) ?? false
                 let station = (f["station_name"] as? String) ?? ""
-                let viewCnt = (f["total_view_cnt"] as? Int) ?? 0
                 let lastStart = f["last_broad_start"] as? String
+                // 라이브면 broad_info[0]에 현재 방송 정보가 들어 있다.
+                //  · broad_img: 방송 썸네일. 프로토콜 상대 URL("//liveimg...")이라 https를 붙인다.
+                //    쿼리의 캐시버스터는 1분 단위 시간 버킷이라 같은 분 안에서는 URL이 안정적이다.
+                //  · total_view_cnt: 현재 시청자 수. (최상위의 동명 필드는 누적값이라 쓰면 안 된다)
+                var thumb: URL?
+                var viewers = 0
+                if let broad = (f["broad_info"] as? [[String: Any]])?.first {
+                    if let img = broad["broad_img"] as? String, !img.isEmpty {
+                        thumb = URL(string: img.hasPrefix("//") ? "https:" + img : img)
+                    }
+                    viewers = (broad["total_view_cnt"] as? Int) ?? 0
+                }
                 favs.append(FavoriteBJ(
                     bjId: bjId, nick: nick, isLive: isLive,
-                    stationName: station, totalViewCount: viewCnt,
-                    lastBroadStart: lastStart
+                    stationName: station, liveViewerCount: viewers,
+                    lastBroadStart: lastStart, thumbnailURL: thumb
                 ))
             }
             // 정렬: 라이브 → 즐겨찾기 추가 순
@@ -316,7 +356,6 @@ final class SOOPAPIClient {
         // 페이지 2가 먼저 도착하면 토크/캠방이 우선 채택되어 라벨이 뒤바뀌었다.)
         var pageResults: [Int: [SOOPCategory]] = [:]
         let lock = NSLock()
-        var anyFailed = false
 
         for page in 1...maxPages {
             group.enter()
@@ -331,7 +370,7 @@ final class SOOPAPIClient {
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let dataDict = json["data"] as? [String: Any],
                       let list = dataDict["list"] as? [[String: Any]] else {
-                    anyFailed = true
+                    // 실패한 페이지는 pageResults에 들어가지 않는다 (아래 notify에서 판정)
                     return
                 }
                 var pageCats: [SOOPCategory] = []
@@ -364,8 +403,14 @@ final class SOOPAPIClient {
             }
             // 정렬: view_cnt 내림차순
             let sorted = unique.sorted { $0.viewCount > $1.viewCount }
-            print("[SOOPAPI] fetchCategories: \(sorted.count) categories (deterministic merge)")
-            if sorted.isEmpty && anyFailed {
+            let missingPages = (1...maxPages).filter { pageResults[$0] == nil }
+            print("[SOOPAPI] fetchCategories: \(sorted.count) categories (deterministic merge)"
+                  + (missingPages.isEmpty ? "" : ", failed pages=\(missingPages)"))
+            // 1페이지(view_cnt 상위 100개)가 빠진 부분 결과를 성공으로 넘기면
+            // "인기 상위 3/12/15개"를 뽑는 HOME/탐색/검색이 전혀 다른 카테고리를 인기로 표시하고,
+            // LIVE 헤더는 줄어든 개수를 단정적으로 보여준다. 부분 결과는 실패로 처리한다.
+            // (2~7페이지 실패는 목록 뒷부분이 짧아질 뿐이라 그대로 성공)
+            if sorted.isEmpty || pageResults[1] == nil {
                 completion(.failure(.invalidResponse))
             } else {
                 completion(.success(sorted))
@@ -593,18 +638,19 @@ final class SOOPAPIClient {
         group.notify(queue: .global()) { completion() }
     }
 
-    func fetchStreamInfo(bjId: String, broadNo: String,
+    /// - parameter password: 비밀번호 방송(BPWD=Y) 입장용 비밀번호. nil이면 미입력 상태로 간주.
+    func fetchStreamInfo(bjId: String, broadNo: String, password: String? = nil,
                         completion: @escaping (Result<StreamInfo, SOOPAPIError>) -> Void) {
         bootstrapCookies(forBJID: bjId, broadNo: broadNo) { [weak self] in
             // play 페이지 방문이 AbroadChk=FAIL 을 찍을 수 있으므로 호출 직전에 제거하고,
             // 로그인 세션이 .com 으로 확실히 복제돼 있도록 한 번 더 미러링한다.
             Self.clearStaleAbroadFail()
             Self.mirrorAuthCookiesToStreamingDomain()
-            self?._fetchStreamInfo(bjId: bjId, broadNo: broadNo, completion: completion)
+            self?._fetchStreamInfo(bjId: bjId, broadNo: broadNo, password: password, completion: completion)
         }
     }
 
-    private func _fetchStreamInfo(bjId: String, broadNo: String,
+    private func _fetchStreamInfo(bjId: String, broadNo: String, password: String?,
                                  completion: @escaping (Result<StreamInfo, SOOPAPIError>) -> Void) {
         guard let url = URL(string: "https://live.sooplive.com/afreeca/player_live_api.php?bjid=\(bjId)") else {
             completion(.failure(.invalidURL))
@@ -617,7 +663,8 @@ final class SOOPAPIClient {
         req.setValue("https://play.sooplive.com/\(bjId)/\(broadNo)", forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        let body = "bid=\(bjId)&bno=\(broadNo)&type=live&pwd=&player_type=html5&stream_type=common&quality=master&mode=landing&from_api=0&is_revive=false"
+        // 비번방(BPWD=Y)이면 입력 비번을 실어 보낸다. 정답이면 TS URL을 바로 받을 수도 있어 고화질에 유리.
+        let body = "bid=\(bjId)&bno=\(broadNo)&type=live&pwd=\(Self.formEncode(password ?? ""))&player_type=html5&stream_type=common&quality=master&mode=landing&from_api=0&is_revive=false"
         req.httpBody = body.data(using: .utf8)
 
         session.dataTask(with: req) { data, response, error in
@@ -657,6 +704,15 @@ final class SOOPAPIClient {
                 return
             }
 
+            // 비밀번호 방송: BPWD=Y. 비번 미입력(1차 진입)이면 UI가 프롬프트를 띄우도록 신호만 보낸다.
+            // 실제 비번 검증은 아래 fetchAID(type=aid)에서 이뤄지고, AID 미발급 시 passwordIncorrect로 매핑.
+            let isPasswordRoom = (channel["BPWD"] as? String) == "Y"
+            if isPasswordRoom, (password ?? "").isEmpty {
+                print("[SOOPAPI] _fetchStreamInfo: BPWD=Y, no password → passwordRequired")
+                completion(.failure(.passwordRequired))
+                return
+            }
+
             let bjNick = channel["BJNICK"] as? String ?? bjId
             let title = channel["TITLE"] as? String ?? ""
             let resolution = channel["RESOLUTION"] as? String ?? ""
@@ -668,7 +724,7 @@ final class SOOPAPIClient {
             // Chrome video element는 TS URL로 1080p~1440p를 받음. AVPlayer는 native HLS이라
             // 미디어 스택 레벨에서 동일 처리될 가능성. 401 받으면 PlayerViewController가
             // timeShiftURL(여기선 view_url+aid)로 자동 fallback.
-            self.fetchAID(bjId: bjId, broadNo: actualBNO) { aidResult in
+            self.fetchAID(bjId: bjId, broadNo: actualBNO, password: password) { aidResult in
                 let aid = (try? aidResult.get()) ?? initialAid
                 if let aid = aid, !aid.isEmpty {
                     self.fetchViewURL(broadNo: actualBNO, bjId: bjId) { vResult in
@@ -719,6 +775,12 @@ final class SOOPAPIClient {
                         aid: nil, resolution: resolution, isLive: true
                     )
                     completion(.success(info))
+                } else if isPasswordRoom, case .failure(.streamUnavailable(_)) = aidResult {
+                    // 서버가 응답은 정상 반환했으나 AID를 발급하지 않음(RESULT=0) = 비밀번호 불일치.
+                    // 네트워크/파싱 실패(.invalidResponse/.decodingFailed)는 아래 일반 오류로 떨군다 —
+                    // 정답을 넣었는데 일시적 오류가 났을 때 "비번 틀림"으로 오표기하지 않기 위함.
+                    print("[SOOPAPI] _fetchStreamInfo: BPWD=Y, AID denied (RESULT=0) → passwordIncorrect")
+                    completion(.failure(.passwordIncorrect))
                 } else {
                     completion(.failure(.streamUnavailable("no auth available")))
                 }
@@ -728,7 +790,8 @@ final class SOOPAPIClient {
 
     /// AID 별도 호출 — `type=aid` 로 player_live_api.php에 다시 POST.
     /// 로그인 세션 쿠키가 있어야 RESULT=1 + AID 반환됨.
-    private func fetchAID(bjId: String, broadNo: String,
+    /// - parameter password: 비밀번호 방송이면 입력 비번. 서버가 이 값으로 AID 발급 여부를 결정한다.
+    private func fetchAID(bjId: String, broadNo: String, password: String? = nil,
                          completion: @escaping (Result<String, SOOPAPIError>) -> Void) {
         guard let url = URL(string: "https://live.sooplive.com/afreeca/player_live_api.php?bjid=\(bjId)") else {
             completion(.failure(.invalidURL))
@@ -740,7 +803,7 @@ final class SOOPAPIClient {
         req.setValue("https://play.sooplive.com", forHTTPHeaderField: "Origin")
         req.setValue("https://play.sooplive.com/\(bjId)/\(broadNo)", forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        let body = "bid=\(bjId)&bno=\(broadNo)&type=aid&pwd=&player_type=html5&stream_type=common&quality=master&mode=landing&from_api=0"
+        let body = "bid=\(bjId)&bno=\(broadNo)&type=aid&pwd=\(Self.formEncode(password ?? ""))&player_type=html5&stream_type=common&quality=master&mode=landing&from_api=0"
         req.httpBody = body.data(using: .utf8)
 
         session.dataTask(with: req) { data, _, _ in
@@ -796,6 +859,12 @@ final class SOOPAPIClient {
     }
 
     // MARK: - 유틸
+
+    /// application/x-www-form-urlencoded 본문에 넣을 값을 안전하게 퍼센트 인코딩.
+    /// 비밀번호에 `&`, `=`, 공백, 한글 등이 들어와도 본문이 깨지지 않도록 영숫자 외 전부 인코딩.
+    private static func formEncode(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
+    }
 
     /// SOOP 응답에 종종 끼는 제어문자(0x00-0x1F 중 \n, \r, \t 제외)를 제거.
     private static func sanitizeJSONBytes(_ data: Data) -> Data {

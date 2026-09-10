@@ -18,6 +18,9 @@ final class LiveCategoriesViewController: UIViewController {
     private var collectionView: UICollectionView!
     private var statusLabel: UILabel!
     private var headerView: SectionHeaderView!
+    private var errorStateView: ErrorStateView?
+    /// 새로고침 연타 시 오래된 응답이 최신 목록을 덮어쓰지 않도록
+    private var loadEpoch = RequestEpoch()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -71,14 +74,21 @@ final class LiveCategoriesViewController: UIViewController {
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+
+        // statusLabel은 collectionView보다 먼저 addSubview되어 불투명한 그리드 배경에 완전히 가려진다.
+        // 로딩/실패 안내가 실제로 보이도록 앞으로 올린다.
+        view.bringSubviewToFront(statusLabel)
     }
 
     private func loadCategories() {
-        statusLabel.isHidden = false
+        let token = loadEpoch.begin()
+        hideErrorState()
+        // 이미 목록이 떠 있으면 갱신 중 안내가 카드 위에 겹쳐 읽기 나빠진다 — 빈 화면일 때만 표시
+        statusLabel.isHidden = !categories.isEmpty
         statusLabel.text = "카테고리 불러오는 중..."
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.loadEpoch.isCurrent(token) else { return }
                 switch result {
                 case .success(let cats):
                     self.categories = cats
@@ -88,10 +98,49 @@ final class LiveCategoriesViewController: UIViewController {
                     self.setNeedsFocusUpdate()
                     self.updateFocusIfNeeded()
                 case .failure(let err):
-                    self.statusLabel.text = "카테고리 로드 실패\n\(err)\n\nPlay/Pause로 재시도"
+                    // 실패한 갱신이 옛 목록을 최신처럼 남기지 않도록 비운다.
+                    // 비우면 포커스 가능한 셀이 사라지므로(=Play/Pause가 이 VC에 도달하지 못함)
+                    // 포커스 가능한 "다시 시도" 버튼이 있는 오류 뷰를 반드시 함께 띄운다.
+                    print("[LiveCategories] load failed: \(err)")
+                    self.categories = []
+                    self.collectionView.reloadData()
+                    self.statusLabel.isHidden = true
+                    self.headerView.setSubtitle("실시간 인기 카테고리")
+                    self.showErrorState()
                 }
             }
         }
+    }
+
+    // MARK: 오류 상태 (카테고리 로드 실패) — HOME/탐색/MY와 동일 패턴
+
+    private func showErrorState() {
+        hideErrorState()
+        let errorView = ErrorStateView(
+            icon: "wifi.exclamationmark",
+            title: "카테고리를 불러오지 못했습니다",
+            subtitle: "인터넷 연결을 확인하고 다시 시도해 주세요"
+        )
+        errorView.onRetry = { [weak self] in self?.loadCategories() }
+        view.addSubview(errorView)
+        NSLayoutConstraint.activate([
+            errorView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            errorView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        errorStateView = errorView
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+    }
+
+    private func hideErrorState() {
+        errorStateView?.removeFromSuperview()
+        errorStateView = nil
+    }
+
+    // 오류 상태 뷰가 떠 있으면 포커스를 "다시 시도" 버튼으로 보낸다
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let errorView = errorStateView { return [errorView] }
+        return super.preferredFocusEnvironments
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -203,6 +252,14 @@ final class CategoryCell: UICollectionViewCell {
             viewerDot.widthAnchor.constraint(equalToConstant: 8),
             viewerDot.heightAnchor.constraint(equalToConstant: 8),
         ])
+    }
+
+    // 포커스 장식(scale/보더/글로우)은 셀 인스턴스에 남으므로, 재사용 시 초기화하지 않으면
+    // reloadData 이후 엉뚱한 카드가 "선택된 것처럼" 보인다.
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        FocusEffect.apply(to: self, focused: false)
+        imageView.cancelImageLoad()
     }
 
     func configure(with cat: SOOPCategory) {

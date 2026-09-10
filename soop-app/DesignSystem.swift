@@ -47,6 +47,9 @@ enum DS {
         static let offlineImageTint = UIColor(white: 0.55, alpha: 1)
         /// 오프라인 포커스 보더 (회색)
         static let focusBorderOffline = UIColor(red: 120/255, green: 120/255, blue: 128/255, alpha: 1)
+
+        /// 음량 HUD의 빈 세그먼트 (white 22% alpha)
+        static let volumeSegmentEmpty = UIColor(white: 1, alpha: 0.22)
     }
 
     // MARK: 타이포그래피
@@ -228,6 +231,27 @@ extension Int {
     }
 }
 
+/// 목록 갱신 경쟁 방지용 요청 세대 토큰.
+///
+/// 앱의 모든 목록 로더는 취소가 없는 fire-and-forget 호출이라, 새로고침을 연달아 하거나
+/// 로그인 알림 같은 자동 트리거가 겹치면 **먼저 보낸 오래된 요청이 나중에 도착해** 최신 목록을
+/// 덮어쓸 수 있다. 로드 시작 시 `begin()`으로 세대를 올려 토큰을 받고, 응답을 반영하기 직전에
+/// `isCurrent(_:)`로 그 사이 더 새로운 로드가 시작되지 않았는지 확인한다.
+///
+/// 모든 로더는 메인 스레드에서 시작하고 콜백도 메인 큐로 넘어온 뒤에 검사하므로 별도 동기화는 없다.
+struct RequestEpoch {
+    private var current = 0
+
+    /// 새 로드 시작 — 이후 이 토큰보다 오래된 응답은 모두 무효가 된다.
+    mutating func begin() -> Int {
+        current += 1
+        return current
+    }
+
+    /// 이 토큰이 아직 가장 최신 로드의 것인가.
+    func isCurrent(_ token: Int) -> Bool { token == current }
+}
+
 // MARK: - 헤더 컨테이너 (재사용 가능)
 
 /// 화면 최상단 헤더 — 큰 타이틀 + 작은 서브타이틀.
@@ -353,6 +377,40 @@ extension UIViewController {
             message = "재생할 수 없습니다"
         }
         ToastView.show(in: view, message: message, duration: 3.5)
+    }
+
+    /// 비밀번호 방송(BPWD=Y) 에러면 tvOS 비밀번호 입력 알림을 띄우고 입력값으로 `retry`를 호출한다.
+    /// 비번 관련 에러가 아니면 아무 것도 안 하고 false를 반환 → 호출부가 showPlaybackError로 폴백.
+    /// - returns: 이 에러를 비밀번호 흐름으로 처리했으면 true.
+    @discardableResult
+    func promptPassword(for err: SOOPAPIError, bjNick: String,
+                        retry: @escaping (String) -> Void) -> Bool {
+        let message: String
+        switch err {
+        case .passwordRequired:  message = "\(bjNick) 님의 방송은 비밀번호가 필요합니다"
+        case .passwordIncorrect: message = "비밀번호가 올바르지 않습니다. 다시 입력하세요"
+        default:                 return false
+        }
+        let alert = UIAlertController(title: "비밀번호 방송", message: message, preferredStyle: .alert)
+        alert.addTextField { tf in
+            tf.isSecureTextEntry = true
+            tf.placeholder = "비밀번호"
+        }
+        alert.addAction(UIAlertAction(title: "취소", style: .cancel))
+        alert.addAction(UIAlertAction(title: "입장", style: .default) { [weak self, weak alert] _ in
+            let pwd = alert?.textFields?.first?.text ?? ""
+            guard !pwd.isEmpty else {
+                // 빈 값으로 입장하면 UIAlertController는 이미 닫히는 중이라 조용한 dead-end가 된다.
+                // 사용자가 흐름에서 이탈하지 않도록 프롬프트를 다시 띄운다. (취소로만 빠져나갈 수 있음)
+                DispatchQueue.main.async {
+                    self?.promptPassword(for: err, bjNick: bjNick, retry: retry)
+                }
+                return
+            }
+            retry(pwd)
+        })
+        present(alert, animated: true)
+        return true
     }
 }
 

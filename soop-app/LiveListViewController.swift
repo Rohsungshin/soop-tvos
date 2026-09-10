@@ -25,6 +25,9 @@ final class LiveListViewController: UIViewController {
     private var headerView: SectionHeaderView!
     private var loadingOverlay: LoadingOverlayView?
     private var skeletonView: LoadingSkeletonView?
+    private var errorStateView: ErrorStateView?
+    /// 새로고침 연타 시 오래된 응답이 최신 목록을 덮어쓰지 않도록
+    private var loadEpoch = RequestEpoch()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -42,6 +45,8 @@ final class LiveListViewController: UIViewController {
     }
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        // 오류 상태에서는 그리드가 비어 포커스 대상이 없다 — "다시 시도" 버튼으로 보낸다
+        if let errorView = errorStateView { return [errorView] }
         return [collectionView]
     }
 
@@ -95,15 +100,22 @@ final class LiveListViewController: UIViewController {
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+
+        // statusLabel은 collectionView보다 먼저 addSubview되어 불투명한 그리드 배경에 완전히 가려진다.
+        // 로딩/실패/빈 목록 안내가 실제로 보이도록 앞으로 올린다.
+        view.bringSubviewToFront(statusLabel)
     }
 
     private func loadBroadcasts() {
-        statusLabel.isHidden = false
+        let token = loadEpoch.begin()
+        hideErrorState()
+        // 이미 카드가 떠 있으면 갱신 중 안내가 그 위에 겹쳐 읽기 나빠진다 — 빈 화면일 때만 표시
+        statusLabel.isHidden = !broadcasts.isEmpty
         statusLabel.text = "방송 불러오는 중..."
         headerView.setSubtitle("방송 불러오는 중...")
         SOOPAPIClient.shared.fetchBroadcasts(byCategory: categoryCode) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.loadEpoch.isCurrent(token) else { return }
                 switch result {
                 case .success(let list):
                     self.broadcasts = list
@@ -118,11 +130,43 @@ final class LiveListViewController: UIViewController {
                     self.setNeedsFocusUpdate()
                     self.updateFocusIfNeeded()
                 case .failure(let err):
-                    self.statusLabel.text = "오류: \(err)\n\nPlay/Pause로 재시도"
+                    // 실패한 갱신이 옛 방송 카드를 최신처럼 남기지 않도록 비운다.
+                    // 비우면 포커스 가능한 셀이 사라져 Play/Pause가 이 VC에 도달하지 못하므로
+                    // 포커스 가능한 "다시 시도" 버튼이 있는 오류 뷰를 반드시 함께 띄운다.
+                    print("[LiveList] load failed: \(err)")
+                    self.broadcasts = []
+                    self.collectionView.reloadData()
+                    self.statusLabel.isHidden = true
                     self.headerView.setSubtitle("로드 실패")
+                    self.showErrorState()
                 }
             }
         }
+    }
+
+    // MARK: 오류 상태 (방송 목록 로드 실패) — HOME/탐색/MY/LIVE와 동일 패턴
+
+    private func showErrorState() {
+        hideErrorState()
+        let errorView = ErrorStateView(
+            icon: "wifi.exclamationmark",
+            title: "방송 목록을 불러오지 못했습니다",
+            subtitle: "인터넷 연결을 확인하고 다시 시도해 주세요"
+        )
+        errorView.onRetry = { [weak self] in self?.loadBroadcasts() }
+        view.addSubview(errorView)
+        NSLayoutConstraint.activate([
+            errorView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            errorView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        errorStateView = errorView
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+    }
+
+    private func hideErrorState() {
+        errorStateView?.removeFromSuperview()
+        errorStateView = nil
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -162,10 +206,10 @@ extension LiveListViewController: UICollectionViewDataSource, UICollectionViewDe
         presentPlayer(for: bc)
     }
 
-    private func presentPlayer(for bc: LiveBroadcast) {
+    private func presentPlayer(for bc: LiveBroadcast, password: String? = nil) {
         showLoadingOverlay(message: "\(bc.bjNick) 방송 연결 중...")
 
-        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo) { [weak self] result in
+        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo, password: password) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.hideLoadingOverlay()
@@ -179,7 +223,12 @@ extension LiveListViewController: UICollectionViewDataSource, UICollectionViewDe
                     player.modalPresentationStyle = .fullScreen
                     self.present(player, animated: true)
                 case .failure(let err):
-                    self.showPlaybackError(err)
+                    // 비번방이면 비밀번호를 받아 재시도, 아니면 일반 에러 토스트.
+                    if !self.promptPassword(for: err, bjNick: bc.bjNick, retry: { pwd in
+                        self.presentPlayer(for: bc, password: pwd)
+                    }) {
+                        self.showPlaybackError(err)
+                    }
                 }
             }
         }
@@ -283,6 +332,14 @@ final class LiveBroadcastCell: UICollectionViewCell {
             infoStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -DS.Spacing.sm),
             infoStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -12),
         ])
+    }
+
+    // 포커스 장식(scale/보더/글로우)은 셀 인스턴스에 남으므로, 재사용 시 초기화하지 않으면
+    // reloadData 이후 엉뚱한 카드가 "선택된 것처럼" 보인다.
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        FocusEffect.apply(to: self, focused: false)
+        imageView.cancelImageLoad()
     }
 
     func configure(with bc: LiveBroadcast) {

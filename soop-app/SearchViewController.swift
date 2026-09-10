@@ -72,10 +72,13 @@ final class SearchResultsViewController: UIViewController {
     private var hasLoadedAll = false
     /// 풀 로드 실패 기록 — 다음 검색 시도 시 자동 재로드 트리거
     private var hasLoadFailed = false
-    /// 자동 재로드 진행 중 — 중복 재로드 방지
-    private var isReloading = false
-    /// 재로드 완료 후 이어서 실행할 검색어
-    private var pendingQuery: String?
+    /// 풀 로드 진행 중 — 중복 로드 방지
+    private var isLoadingPool = false
+    /// 지금 화면에 반영돼 있는 검색어. 풀이 새로 로드되면 이 검색어로 결과를 다시 계산한다.
+    /// (풀만 갱신하고 화면을 다시 계산하지 않아 옛 결과가 남던 문제의 해결점)
+    private var currentQuery = ""
+    /// 새로고침이 겹쳤을 때 오래된 풀이 최신 풀을 덮어쓰지 않도록
+    private var poolEpoch = RequestEpoch()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -154,18 +157,17 @@ final class SearchResultsViewController: UIViewController {
     func reloadPool() {
         hasLoadedAll = false
         hasLoadFailed = false
-        isReloading = false
         loadAllBroadcasts()
     }
 
     private func loadAllBroadcasts() {
+        let token = poolEpoch.begin()
+        isLoadingPool = true
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.poolEpoch.isCurrent(token) else { return }
                 guard case .success(let cats) = result else {
-                    // 실패 기록 — 다음 검색 시도 시 runSearch가 자동 재로드한다
-                    self.hasLoadFailed = true
-                    self.isReloading = false
+                    self.finishPoolLoad(with: nil)
                     return
                 }
                 let group = DispatchGroup()
@@ -181,20 +183,50 @@ final class SearchResultsViewController: UIViewController {
                         group.leave()
                     }
                 }
-                group.notify(queue: .main) {
-                    self.allBroadcasts = combined
-                    self.hasLoadedAll = true
-                    self.hasLoadFailed = false
-                    // 자동 재로드 성공 — 마지막으로 시도한 검색어로 이어서 검색
-                    if self.isReloading {
-                        self.isReloading = false
-                        if let q = self.pendingQuery {
-                            self.pendingQuery = nil
-                            self.runSearch(q)
-                        }
-                    }
+                group.notify(queue: .main) { [weak self] in
+                    guard let self = self, self.poolEpoch.isCurrent(token) else { return }
+                    // 인기 상위 15개 카테고리에 라이브가 하나도 없는 경우는 사실상 없다.
+                    // 빈 풀은 전부 실패한 것으로 보고 "결과 없음"을 단정하지 않는다.
+                    self.finishPoolLoad(with: combined.isEmpty ? nil : combined)
                 }
             }
+        }
+    }
+
+    /// 풀 로드 종료 처리. `pool`이 nil이면 실패.
+    /// 성공하면 **화면의 결과도 새 풀 기준으로 다시 계산한다** — 풀만 갈아끼우고 그리드를
+    /// 그대로 두면 새로고침 후에도 갱신 전 풀의 카드가 남는다.
+    private func finishPoolLoad(with pool: [LiveBroadcast]?) {
+        isLoadingPool = false
+        if let pool = pool {
+            allBroadcasts = pool
+            hasLoadedAll = true
+            hasLoadFailed = false
+        } else {
+            allBroadcasts = []
+            hasLoadedAll = false
+            hasLoadFailed = true
+        }
+        // UISearchController는 결과 VC의 뷰를 검색이 활성화될 때까지 지연 로드한다.
+        // 검색을 한 번도 열지 않은 상태에서 Play/Pause 새로고침이 들어오면 UI가 아직 없으므로
+        // 상태만 갱신하고 빠진다 (뷰가 로드되면 viewDidLoad가 풀을 다시 받는다).
+        guard isViewLoaded else { return }
+
+        guard hasLoadedAll else {
+            filtered = []
+            resultsCollectionView.reloadData()
+            emptyLabel.text = "검색 데이터를 불러오지 못했습니다\n다시 검색하면 자동으로 재시도합니다"
+            setEmptyStateVisible(true)
+            return
+        }
+        if currentQuery.isEmpty {
+            // 이전 실패 안내("불러오지 못했습니다")가 남지 않도록 초기 상태 문구까지 되돌린다
+            filtered = []
+            resultsCollectionView.reloadData()
+            emptyLabel.text = "검색어를 입력해 보세요"
+            setEmptyStateVisible(true)
+        } else {
+            runSearch(currentQuery)
         }
     }
 
@@ -243,25 +275,25 @@ final class SearchResultsViewController: UIViewController {
     private func runSearch(_ query: String) {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if q.isEmpty {
+            currentQuery = ""
             filtered = []
             emptyLabel.text = "검색어를 입력해 보세요"
             setEmptyStateVisible(true)
             resultsCollectionView.reloadData()
             return
         }
+        // 풀이 나중에 도착하거나 새로고침되면 이 검색어로 결과를 다시 계산한다
+        currentQuery = query
         if !hasLoadedAll {
             // 아직 검색 가능한 풀이 없음 — 이전 결과 그리드를 비우고 빈 상태로 전환 (design §2-3)
             filtered = []
             resultsCollectionView.reloadData()
-            if isReloading {
-                // 재로드 진행 중 — 중복 재로드 없이 검색어만 갱신
-                pendingQuery = query
+            if isLoadingPool {
+                // 로드 진행 중 — 중복 로드 없이 완료를 기다린다 (완료 시 currentQuery로 재검색)
                 emptyLabel.text = "데이터를 다시 불러오고 있습니다"
                 ToastView.show(in: view, message: "데이터를 다시 불러오고 있습니다", duration: 2.0)
             } else if hasLoadFailed {
                 // 풀 로드 실패 상태 — 검색 시도를 트리거로 자동 재로드
-                pendingQuery = query
-                isReloading = true
                 emptyLabel.text = "검색 데이터를 다시 불러옵니다"
                 ToastView.show(in: view, message: "검색 데이터를 다시 불러옵니다", duration: 2.0)
                 loadAllBroadcasts()
@@ -310,12 +342,15 @@ final class SearchResultsViewController: UIViewController {
 extension SearchResultsViewController: UISearchResultsUpdating {
     func updateSearchResults(for searchController: UISearchController) {
         let text = searchController.searchBar.text ?? ""
-        // tvOS 검색 키보드는 한 글자씩 들어옴 — 1글자는 너무 광범위하므로 2글자 이상에서 필터링
+        // tvOS 검색 키보드는 한 글자씩 들어옴 — 1글자는 너무 광범위하므로 2글자 이상에서 필터링.
+        // 단 1글자까지 지웠을 때 아무 것도 하지 않으면 이전 검색어의 결과가 그대로 남으므로
+        // 빈 문자열과 동일하게 결과를 비운다.
         if text.count >= 2 {
             runSearch(text)
-        } else if text.isEmpty {
+        } else {
+            currentQuery = ""
             filtered = []
-            emptyLabel.text = "검색어를 입력해 보세요"
+            emptyLabel.text = text.isEmpty ? "검색어를 입력해 보세요" : "두 글자 이상 입력해 주세요"
             setEmptyStateVisible(true)
             resultsCollectionView.reloadData()
         }
@@ -332,9 +367,12 @@ extension SearchResultsViewController: UICollectionViewDataSource, UICollectionV
         return cell
     }
     func collectionView(_ cv: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        let bc = filtered[indexPath.item]
+        playBroadcast(filtered[indexPath.item])
+    }
+
+    private func playBroadcast(_ bc: LiveBroadcast, password: String? = nil) {
         let overlay = LoadingOverlayView.show(in: view, message: "\(bc.bjNick) 방송 연결 중...")
-        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo) { [weak self] result in
+        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo, password: password) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 overlay.dismiss()
@@ -347,7 +385,11 @@ extension SearchResultsViewController: UICollectionViewDataSource, UICollectionV
                     player.modalPresentationStyle = .fullScreen
                     self.present(player, animated: true)
                 case .failure(let err):
-                    self.showPlaybackError(err)
+                    if !self.promptPassword(for: err, bjNick: bc.bjNick, retry: { pwd in
+                        self.playBroadcast(bc, password: pwd)
+                    }) {
+                        self.showPlaybackError(err)
+                    }
                 }
             }
         }

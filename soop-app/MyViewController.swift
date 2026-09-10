@@ -28,6 +28,9 @@ final class MyViewController: UIViewController {
     private var errorStateView: ErrorStateView?
     private var statusLabel: UILabel!
     private var loadingOverlay: LoadingOverlayView?
+    /// 트리거가 5개(최초 로드/로그인 알림/Play-Pause/빈 상태 새로고침/오류 재시도)라 요청이 겹치기 쉽다.
+    /// 오래된 응답 — 특히 로그인 전에 나간 미인증 응답 — 이 최신 목록을 덮어쓰지 않도록.
+    private var loadEpoch = RequestEpoch()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -99,16 +102,22 @@ final class MyViewController: UIViewController {
             collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+
+        // statusLabel은 collectionView보다 먼저 addSubview되어 불투명한 그리드 배경에 가려진다.
+        // 목록을 비운 뒤 재시도하는 동안 안내가 보이도록 앞으로 올린다.
+        view.bringSubviewToFront(statusLabel)
     }
 
     private func loadFavorites() {
-        statusLabel.isHidden = false
+        let token = loadEpoch.begin()
+        // 이미 카드가 떠 있으면 갱신 중 안내가 그 위에 겹친다 — 빈 화면일 때만 표시
+        statusLabel.isHidden = !(liveFavorites.isEmpty && offlineFavorites.isEmpty)
         statusLabel.text = "즐겨찾기 불러오는 중..."
         hideEmptyState()
         hideErrorState()
         SOOPAPIClient.shared.fetchFavorites { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.loadEpoch.isCurrent(token) else { return }
                 switch result {
                 case .success(let favs):
                     self.liveFavorites = favs.filter { $0.isLive }.sorted { $0.nick < $1.nick }
@@ -124,6 +133,12 @@ final class MyViewController: UIViewController {
                     self.setNeedsFocusUpdate()
                     self.updateFocusIfNeeded()
                 case .failure(let err):
+                    // 실패한 갱신이 옛 즐겨찾기 카드를 최신처럼 남기지 않도록 비운다.
+                    // (ErrorStateView는 배경이 투명하고 화면 중앙에만 놓여 옛 그리드를 가리지 못한다)
+                    self.liveFavorites = []
+                    self.offlineFavorites = []
+                    self.collectionView.reloadData()
+                    self.headerView.setSubtitle("즐겨찾기 BJ")
                     self.statusLabel.isHidden = true
                     self.showErrorState(for: err)
                 }
@@ -322,9 +337,9 @@ extension MyViewController: UICollectionViewDataSource, UICollectionViewDelegate
         }
     }
 
-    private func playLive(_ f: FavoriteBJ) {
+    private func playLive(_ f: FavoriteBJ, password: String? = nil) {
         showLoadingOverlay(message: "\(f.nick) 방송 연결 중...")
-        SOOPAPIClient.shared.fetchStreamInfo(bjId: f.bjId, broadNo: "0") { [weak self] result in
+        SOOPAPIClient.shared.fetchStreamInfo(bjId: f.bjId, broadNo: "0", password: password) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.hideLoadingOverlay()
@@ -334,7 +349,7 @@ extension MyViewController: UICollectionViewDataSource, UICollectionViewDelegate
                     let bc = LiveBroadcast(
                         bjId: info.bjId, broadNo: info.broadNo, title: info.title,
                         bjNick: info.bjNick, thumbnailURL: nil,
-                        viewerCount: f.totalViewCount, category: ""
+                        viewerCount: f.liveViewerCount, category: ""
                     )
                     RecentWatchStore.shared.save(bc)
                     let p = PlayerViewController()
@@ -342,7 +357,11 @@ extension MyViewController: UICollectionViewDataSource, UICollectionViewDelegate
                     p.modalPresentationStyle = .fullScreen
                     self.present(p, animated: true)
                 case .failure(let err):
-                    self.showPlaybackError(err)
+                    if !self.promptPassword(for: err, bjNick: f.nick, retry: { pwd in
+                        self.playLive(f, password: pwd)
+                    }) {
+                        self.showPlaybackError(err)
+                    }
                 }
             }
         }
@@ -488,6 +507,15 @@ final class MyLiveBroadcastCell: UICollectionViewCell {
         ])
     }
 
+    // 포커스 장식(scale/보더/글로우)은 셀 인스턴스에 남으므로, 재사용 시 초기화하지 않으면
+    // reloadData 이후 엉뚱한 카드가 "선택된 것처럼" 보인다.
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        FocusEffect.apply(to: self, focused: false)
+        currentBJID = nil
+        imageView.cancelImageLoad()
+    }
+
     func configure(with f: FavoriteBJ) {
         // v3.2: 셀 재사용 시 fallback이 옛 BJ 이미지를 덮어쓰지 않도록 ID 기록
         currentBJID = f.bjId
@@ -503,22 +531,22 @@ final class MyLiveBroadcastCell: UICollectionViewCell {
             titleLabel.isHidden = false
             bjLabel.text = "라이브 방송 중"
         }
-        if f.totalViewCount > 0 {
-            viewerLabel.text = "  \(f.totalViewCount.koreanCount()) 시청  "
+        if f.liveViewerCount > 0 {
+            viewerLabel.text = "  \(f.liveViewerCount.koreanCount()) 시청  "
             viewerLabel.isHidden = false
         } else {
             viewerLabel.isHidden = true
         }
-        // 라이브 썸네일 시도 (BJID 패턴 — 실패하면 프로필로 fallback)
-        let urlStr = "https://liveimg.sooplive.com/m/\(f.bjId)?bucket=\(Int(Date().timeIntervalSince1970) / 300)"
-        let liveURL = URL(string: urlStr)
+        // 방송 썸네일(480x270)이 있으면 그것을, 없거나 실패하면 고해상도 프로필로.
         let bjId = f.bjId
-        imageView.loadImage(from: liveURL) { [weak self] success in
+        let profileURL = SOOPAPIClient.profileImageURL(bjId: bjId)
+        guard let thumbnailURL = f.thumbnailURL else {
+            imageView.loadImage(from: profileURL)
+            return
+        }
+        imageView.loadImage(from: thumbnailURL) { [weak self] success in
             guard let self = self, !success, self.currentBJID == bjId else { return }
-            // 프로필 이미지로 fallback
-            let prefix = String(bjId.prefix(2))
-            let fallback = URL(string: "https://stimg.sooplive.com/LOGO/\(prefix)/\(bjId)/m/\(bjId).webp")
-            self.imageView.loadImage(from: fallback)
+            self.imageView.loadImage(from: profileURL)
         }
     }
 
@@ -602,11 +630,16 @@ final class MyOfflineBJCell: UICollectionViewCell {
         ])
     }
 
+    // 오프라인 카드도 포커스 장식이 셀에 남으므로 재사용 시 초기화한다.
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        FocusEffect.applyOffline(to: self, focused: false)
+        imageView.cancelImageLoad()
+    }
+
     func configure(with f: FavoriteBJ) {
         nickLabel.text = f.nick
-        let prefix = String(f.bjId.prefix(2))
-        let url = URL(string: "https://stimg.sooplive.com/LOGO/\(prefix)/\(f.bjId)/m/\(f.bjId).webp")
-        imageView.loadImage(from: url)
+        imageView.loadImage(from: SOOPAPIClient.profileImageURL(bjId: f.bjId))
     }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,

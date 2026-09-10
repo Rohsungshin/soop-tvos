@@ -26,6 +26,12 @@ final class HomeViewController: UIViewController {
     private var recentBroadcasts: [LiveBroadcast] = []
     private var favoritesLive: [FavoriteBJ] = []
 
+    // 세 목록은 각각 독립적으로 갱신되므로 세대도 따로 관리한다.
+    // (카테고리 → 인기 라이브는 하나의 연쇄이므로 dataEpoch를 공유)
+    private var dataEpoch = RequestEpoch()
+    private var favEpoch = RequestEpoch()
+    private var recentEpoch = RequestEpoch()
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = DS.Colors.background
@@ -41,9 +47,9 @@ final class HomeViewController: UIViewController {
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses where press.type == .playPause {
+            // loadData()가 즐겨찾기/최근 시청까지 이어서 부른다.
+            // 여기서 또 부르면 같은 API가 2번 동시에 나가 오래된 응답이 이길 수 있다.
             loadData()
-            loadFavorites()
-            loadRecent()
             ToastView.show(in: view, message: "새로고침 중...", duration: 1.2)
             return
         }
@@ -102,20 +108,27 @@ final class HomeViewController: UIViewController {
     }
 
     private func loadData() {
+        let token = dataEpoch.begin()
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.dataEpoch.isCurrent(token) else { return }
                 switch result {
                 case .success(let cats):
                     // 카테고리 도착 즉시 스켈레톤 해제 — 스켈레톤 위 reloadData 방지
                     self.hideSkeleton()
                     self.hideErrorState()
                     self.popularCategories = Array(cats.prefix(6))
+                    // 인기 라이브는 아직 이전 갱신의 결과지만, 뒤이은 loadPopularLive가
+                    // 성공/실패 어느 쪽이든 항상 덮어쓰므로 여기서 비우지 않는다.
+                    // (비우면 새로고침마다 행이 사라졌다 나타나 레이아웃이 튄다)
                     self.tableView.reloadData()
-                    self.loadPopularLive(from: Array(cats.prefix(3)))
+                    self.loadPopularLive(from: Array(cats.prefix(3)), token: token)
                 case .failure:
-                    // 실패 확정 — 스켈레톤 즉시 해제 후 오류 상태 뷰 표시
+                    // 실패 확정 — 스켈레톤 즉시 해제, 옛 목록을 비우고 오류 상태 뷰 표시
                     self.hideSkeleton()
+                    self.popularCategories = []
+                    self.popularLive = []
+                    self.tableView.reloadData()
                     self.showErrorState()
                 }
             }
@@ -124,7 +137,7 @@ final class HomeViewController: UIViewController {
         loadRecent()
     }
 
-    private func loadPopularLive(from categories: [SOOPCategory]) {
+    private func loadPopularLive(from categories: [SOOPCategory], token: Int) {
         let group = DispatchGroup()
         var combined: [LiveBroadcast] = []
         let queue = DispatchQueue(label: "home.merge")
@@ -138,7 +151,7 @@ final class HomeViewController: UIViewController {
             }
         }
         group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.dataEpoch.isCurrent(token) else { return }
             self.popularLive = combined.sorted { $0.viewerCount > $1.viewerCount }.prefix(10).map { $0 }
             self.tableView.reloadData()
         }
@@ -180,18 +193,24 @@ final class HomeViewController: UIViewController {
     }
 
     private func loadFavorites() {
+        let token = favEpoch.begin()
         SOOPAPIClient.shared.fetchFavorites { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                if case .success(let favs) = result {
+                guard let self = self, self.favEpoch.isCurrent(token) else { return }
+                switch result {
+                case .success(let favs):
                     self.favoritesLive = favs.filter { $0.isLive }
-                    self.tableView.reloadData()
+                case .failure:
+                    // 실패를 무시하면 이미 방송을 끝낸 BJ가 LIVE 배지를 단 채 계속 남는다
+                    self.favoritesLive = []
                 }
+                self.tableView.reloadData()
             }
         }
     }
 
     private func loadRecent() {
+        let token = recentEpoch.begin()
         let saved = RecentWatchStore.shared.load()
         guard !saved.isEmpty else {
             recentBroadcasts = []
@@ -204,7 +223,7 @@ final class HomeViewController: UIViewController {
         let bjids = saved.map(\.bjId)
         SOOPAPIClient.shared.fetchLiveListForBJIDs(bjids) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.recentEpoch.isCurrent(token) else { return }
                 switch result {
                 case .success(let live):
                     // 응답에서 BJID 기반 lookup 만들고, 저장 순서(최신 → 과거)를 유지하며 매핑
@@ -226,9 +245,9 @@ final class HomeViewController: UIViewController {
         navigationController?.pushViewController(listVC, animated: true)
     }
 
-    fileprivate func didSelectBroadcast(_ bc: LiveBroadcast) {
+    fileprivate func didSelectBroadcast(_ bc: LiveBroadcast, password: String? = nil) {
         let overlay = LoadingOverlayView.show(in: view, message: "\(bc.bjNick) 방송 연결 중...")
-        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo) { [weak self] result in
+        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo, password: password) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 overlay.dismiss()
@@ -241,15 +260,19 @@ final class HomeViewController: UIViewController {
                     player.modalPresentationStyle = .fullScreen
                     self.present(player, animated: true)
                 case .failure(let err):
-                    self.showPlaybackError(err)
+                    if !self.promptPassword(for: err, bjNick: bc.bjNick, retry: { pwd in
+                        self.didSelectBroadcast(bc, password: pwd)
+                    }) {
+                        self.showPlaybackError(err)
+                    }
                 }
             }
         }
     }
 
-    fileprivate func didSelectFavorite(_ f: FavoriteBJ) {
+    fileprivate func didSelectFavorite(_ f: FavoriteBJ, password: String? = nil) {
         let overlay = LoadingOverlayView.show(in: view, message: "\(f.nick) 방송 연결 중...")
-        SOOPAPIClient.shared.fetchStreamInfo(bjId: f.bjId, broadNo: "0") { [weak self] result in
+        SOOPAPIClient.shared.fetchStreamInfo(bjId: f.bjId, broadNo: "0", password: password) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 overlay.dismiss()
@@ -262,7 +285,7 @@ final class HomeViewController: UIViewController {
                         title: info.title,
                         bjNick: info.bjNick,
                         thumbnailURL: nil,
-                        viewerCount: f.totalViewCount,
+                        viewerCount: f.liveViewerCount,
                         category: ""
                     )
                     RecentWatchStore.shared.save(bc)
@@ -271,7 +294,11 @@ final class HomeViewController: UIViewController {
                     player.modalPresentationStyle = .fullScreen
                     self.present(player, animated: true)
                 case .failure(let err):
-                    self.showPlaybackError(err)
+                    if !self.promptPassword(for: err, bjNick: f.nick, retry: { pwd in
+                        self.didSelectFavorite(f, password: pwd)
+                    }) {
+                        self.showPlaybackError(err)
+                    }
                 }
             }
         }

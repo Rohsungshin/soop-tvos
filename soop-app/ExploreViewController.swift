@@ -23,6 +23,9 @@ final class ExploreViewController: UIViewController {
     private var popularCategories: [SOOPCategory] = []
     private var popularBroadcasts: [LiveBroadcast] = []
     private var recentBroadcasts: [LiveBroadcast] = []
+    /// 카테고리 → 인기 방송 연쇄 로드 전체를 하나의 세대로 묶는다.
+    /// 새로고침이 겹쳤을 때 "새 카테고리 + 옛 인기 방송"이 섞이지 않게.
+    private var dataEpoch = RequestEpoch()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -73,9 +76,10 @@ final class ExploreViewController: UIViewController {
     }
 
     private func loadData() {
+        let token = dataEpoch.begin()
         SOOPAPIClient.shared.fetchCategories { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.dataEpoch.isCurrent(token) else { return }
                 switch result {
                 case .success(let cats):
                     self.hideErrorState()
@@ -84,9 +88,13 @@ final class ExploreViewController: UIViewController {
                     self.tableView.reloadData()
                     // 인기 방송 — 상위 3개 카테고리 머지
                     let topForBroadcasts = Array(cats.prefix(3))
-                    self.loadPopularBroadcasts(from: topForBroadcasts)
+                    self.loadPopularBroadcasts(from: topForBroadcasts, token: token)
                 case .failure:
-                    // 로드 실패 — 오류 상태 뷰 + 재시도 (검색 진입 셀은 그대로 유지)
+                    // 로드 실패 — 실패한 갱신이 옛 캐러셀을 최신처럼 남기지 않도록 비우고
+                    // 오류 상태 뷰 + 재시도를 띄운다 (검색 진입 셀은 그대로 유지)
+                    self.popularCategories = []
+                    self.popularBroadcasts = []
+                    self.tableView.reloadData()
                     self.showErrorState()
                 }
             }
@@ -124,7 +132,7 @@ final class ExploreViewController: UIViewController {
         return super.preferredFocusEnvironments
     }
 
-    private func loadPopularBroadcasts(from categories: [SOOPCategory]) {
+    private func loadPopularBroadcasts(from categories: [SOOPCategory], token: Int) {
         let group = DispatchGroup()
         var combined: [LiveBroadcast] = []
         let queue = DispatchQueue(label: "explore.merge")
@@ -138,7 +146,7 @@ final class ExploreViewController: UIViewController {
             }
         }
         group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.dataEpoch.isCurrent(token) else { return }
             // 시청자수 내림차순 정렬 후 상위 20개
             self.popularBroadcasts = combined.sorted { $0.viewerCount > $1.viewerCount }.prefix(20).map { $0 }
             self.tableView.reloadData()
@@ -154,9 +162,9 @@ final class ExploreViewController: UIViewController {
     }
 
     // 셀에서 콜백으로 호출 — 방송 선택
-    fileprivate func didSelectBroadcast(_ bc: LiveBroadcast) {
+    fileprivate func didSelectBroadcast(_ bc: LiveBroadcast, password: String? = nil) {
         let overlay = LoadingOverlayView.show(in: view, message: "\(bc.bjNick) 방송 연결 중...")
-        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo) { [weak self] result in
+        SOOPAPIClient.shared.fetchStreamInfo(bjId: bc.bjId, broadNo: bc.broadNo, password: password) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 overlay.dismiss()
@@ -169,7 +177,11 @@ final class ExploreViewController: UIViewController {
                     player.modalPresentationStyle = .fullScreen
                     self.present(player, animated: true)
                 case .failure(let err):
-                    self.showPlaybackError(err)
+                    if !self.promptPassword(for: err, bjNick: bc.bjNick, retry: { pwd in
+                        self.didSelectBroadcast(bc, password: pwd)
+                    }) {
+                        self.showPlaybackError(err)
+                    }
                 }
             }
         }
