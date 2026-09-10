@@ -49,13 +49,59 @@ final class PlayerViewController: UIViewController {
     private var topMetaBJLabel: UILabel!
     private var hideMetaTimer: Timer?
 
+    // v5.1: 음량 제어
+    //
+    // Siri Remote의 물리 음량 버튼은 tvOS 시스템이 소비해 앱에 전달되지 않는다.
+    //   • UIPress.PressType에 volume 케이스가 존재하지 않음 (AppleTVOS SDK 확인)
+    //   • GameController / AVKit도 Siri Remote 음량 입력을 노출하지 않음
+    //   • AVAudioSession.outputVolume은 tvOS에서 readonly (setter 없음)
+    // 그 버튼은 HDMI-CEC / IR로 TV·리시버 볼륨을 직접 제어하며,
+    // 동작하지 않으면 [설정 > 리모컨과 기기 > 음량 조절]에서 고쳐야 한다 (Apple 지원 108769).
+    //
+    // 따라서 앱이 제공할 수 있는 음량 기능은 다음 3가지다.
+    //   (1) AVPlayer.volume 기반 인앱 음량 — 트랜스포트 바 컨트롤로 리모컨 조작
+    //   (2) AVAudioSession.outputVolume KVO — AirPlay/HomePod/BT 출력일 때
+    //       물리 음량 버튼이 바꾼 시스템 음량을 HUD로 표시
+    //   (3) 외부 HID 키보드/리모컨의 음량 키 처리 (press.key.keyCode)
+    private static let volumeStep: Float = 0.1
+    private static let volumeSegmentCount = 10
+    private static let volumeDefaultsKey = "soop.player.volume"
+    // HUD 전용 치수 — DS 토큰 없음
+    private static let volumeSegmentSize = CGSize(width: 22, height: 18)
+    private static let volumeSegmentGap: CGFloat = 4
+    private static let volumeSegmentRadius: CGFloat = 3
+    private static let volumeValueWidth: CGFloat = 110
+    private static let volumeHintWidth: CGFloat = 560
+    private static let volumeIconWidth: CGFloat = 44
+    private static let volumeIconPointSize: CGFloat = 30
+    private static let volumeColumnSpacing: CGFloat = 6
+    private static let volumeHUDDwell: TimeInterval = 2.5
+    private static let volumeHintDwell: TimeInterval = 6.0
+
+    private enum VolumeSource { case app, system }
+
+    private var volumeHUD: UIView!
+    private var volumeIconView: UIImageView!
+    private var volumeSegments: [UIView] = []
+    private var volumeValueLabel: UILabel!
+    private var volumeSourceLabel: UILabel!
+    private var volumeHintLabel: UILabel!
+    private var hideVolumeHUDTimer: Timer?
+    private var systemVolumeObservation: NSKeyValueObservation?
+    private var didShowVolumeHint = false
+    /// 다시 시도로 AVPlayer를 새로 만들 때 음소거 상태를 이어 준다 (세션 범위, 저장하지 않음)
+    private var pendingMuted = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = DS.Colors.background
 
+        configureAudioSession()
         setupPreRoll()
         setupResolutionLabel()
         setupTopMetaOverlay()
+        setupVolumeHUD()
+        observeSystemVolume()
         startPlayback()
     }
 
@@ -243,6 +289,206 @@ final class PlayerViewController: UIViewController {
         }
     }
 
+    // MARK: - 오디오 세션
+
+    /// tvOS 프로세스 기본 카테고리는 soloAmbient다. 동영상 재생 앱은 .playback + .moviePlayback이 맞다.
+    /// 세션을 명시적으로 활성화해야 AVPlayer 오디오가 정상 출력 경로(TV·리시버·AirPlay)로 나간다.
+    private func configureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+            print("[Player] audioSession .playback/.moviePlayback active — outputVolume=\(session.outputVolume)")
+        } catch {
+            print("[Player] audioSession setup FAILED: \(error)")
+        }
+    }
+
+    private func deactivateAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            print("[Player] audioSession deactivate FAILED: \(error)")
+        }
+    }
+
+    /// 시스템 출력 음량은 tvOS에서 읽기 전용이지만 KVO는 가능하다.
+    /// AirPlay·HomePod·블루투스 출력일 때는 물리 음량 버튼이 이 값을 바꾸므로 HUD로 보여 준다
+    /// (HDMI-CEC / IR 출력이면 값이 변하지 않는다 — 상단 주석 참고).
+    private func observeSystemVolume() {
+        systemVolumeObservation = AVAudioSession.sharedInstance()
+            .observe(\.outputVolume, options: [.new]) { [weak self] session, _ in
+                DispatchQueue.main.async {
+                    guard let self = self,
+                          self.isViewLoaded, self.view.window != nil,
+                          (self.avVC?.view.alpha ?? 0) > 0 else { return }
+                    print("[Player] system outputVolume → \(session.outputVolume)")
+                    self.showVolumeHUD(source: .system)
+                }
+            }
+    }
+
+    // MARK: - 인앱 음량
+
+    private static func savedVolume() -> Float {
+        guard UserDefaults.standard.object(forKey: volumeDefaultsKey) != nil else { return 1.0 }
+        return min(max(UserDefaults.standard.float(forKey: volumeDefaultsKey), 0), 1)
+    }
+
+    /// 트랜스포트 바에 음량 컨트롤을 붙인다 (AVPlayerViewController.transportBarCustomMenuItems, tvOS 15+).
+    /// 재생 중 리모컨을 아래로 스와이프 → 트랜스포트 바 → 좌우 이동으로 선택한다.
+    /// 항목 제목은 고정이다 — 상태에 따라 배열을 다시 할당하면 사용자가 누르고 있는
+    /// 항목의 포커스가 초기화될 수 있어, 음소거 상태는 HUD로만 보여 준다.
+    private func makeTransportBarItems() -> [UIMenuElement] {
+        let down = UIAction(title: "음량 낮추기",
+                            image: UIImage(systemName: "speaker.wave.1.fill")) { [weak self] _ in
+            self?.stepVolume(by: -Self.volumeStep)
+        }
+        let up = UIAction(title: "음량 높이기",
+                          image: UIImage(systemName: "speaker.wave.3.fill")) { [weak self] _ in
+            self?.stepVolume(by: Self.volumeStep)
+        }
+        let mute = UIAction(title: "음소거 전환",
+                            image: UIImage(systemName: "speaker.slash.fill")) { [weak self] _ in
+            self?.toggleMute()
+        }
+        return [down, up, mute]
+    }
+
+    private func stepVolume(by delta: Float) {
+        guard let player = avVC?.player else { return }
+        // 음소거 중 어느 방향이든 음량을 조작하면 음소거를 푼다 (숨은 상태로 값만 바뀌는 일 방지)
+        player.isMuted = false
+        player.volume = min(max(player.volume + delta, 0), 1)
+        UserDefaults.standard.set(player.volume, forKey: Self.volumeDefaultsKey)
+        print("[Player] app volume → \(player.volume)")
+        showVolumeHUD(source: .app)
+    }
+
+    private func toggleMute() {
+        guard let player = avVC?.player else { return }
+        player.isMuted.toggle()
+        print("[Player] muted → \(player.isMuted)")
+        showVolumeHUD(source: .app)
+    }
+
+    // MARK: - 음량 HUD
+
+    private func setupVolumeHUD() {
+        volumeHUD = UIView()
+        volumeHUD.backgroundColor = DS.Colors.viewerBadgeBackground
+        volumeHUD.layer.cornerRadius = DS.Corner.button
+        volumeHUD.alpha = 0
+        volumeHUD.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(volumeHUD)
+
+        // 스택 뷰의 arrangedSubview는 translatesAutoresizingMaskIntoConstraints를 스택이 직접 관리한다
+        volumeIconView = UIImageView(image: UIImage(systemName: "speaker.wave.2.fill"))
+        volumeIconView.tintColor = DS.Colors.textPrimary
+        volumeIconView.contentMode = .center
+        // 심볼 3종(speaker / wave.2 / slash)의 폭이 달라도 베이스라인·캡 높이가 같도록 고정 포인트 크기
+        volumeIconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: Self.volumeIconPointSize, weight: .semibold)
+        volumeIconView.widthAnchor.constraint(equalToConstant: Self.volumeIconWidth).isActive = true
+
+        let segmentBar = UIStackView()
+        segmentBar.axis = .horizontal
+        segmentBar.spacing = Self.volumeSegmentGap
+        volumeSegments = (0..<Self.volumeSegmentCount).map { _ in
+            let seg = UIView()
+            seg.backgroundColor = DS.Colors.volumeSegmentEmpty
+            seg.layer.cornerRadius = Self.volumeSegmentRadius
+            seg.widthAnchor.constraint(equalToConstant: Self.volumeSegmentSize.width).isActive = true
+            seg.heightAnchor.constraint(equalToConstant: Self.volumeSegmentSize.height).isActive = true
+            segmentBar.addArrangedSubview(seg)
+            return seg
+        }
+
+        volumeValueLabel = UILabel()
+        volumeValueLabel.textColor = DS.Colors.textPrimary
+        volumeValueLabel.font = DS.Typography.cardTitle
+        volumeValueLabel.textAlignment = .right
+        volumeValueLabel.widthAnchor.constraint(equalToConstant: Self.volumeValueWidth).isActive = true
+
+        let row = UIStackView(arrangedSubviews: [volumeIconView, segmentBar, volumeValueLabel])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = DS.Spacing.sm
+
+        volumeSourceLabel = UILabel()
+        volumeSourceLabel.textColor = DS.Colors.textSecondary
+        volumeSourceLabel.font = DS.Typography.caption
+
+        // 메뉴 명칭은 Apple 한국어 지원 문서(108769) 표기를 따른다
+        volumeHintLabel = UILabel()
+        volumeHintLabel.text = "리모컨의 음량 버튼은 TV·리시버 음량을 조절합니다\n반응이 없으면 설정 > 리모컨과 기기 > 음량 조절에서 바꿔 보세요"
+        volumeHintLabel.textColor = DS.Colors.textSecondary
+        volumeHintLabel.font = DS.Typography.caption
+        volumeHintLabel.numberOfLines = 2
+        volumeHintLabel.textAlignment = .center
+        volumeHintLabel.isHidden = true
+        volumeHintLabel.widthAnchor.constraint(equalToConstant: Self.volumeHintWidth).isActive = true
+
+        // 힌트가 보일 때/숨을 때 필의 폭이 달라져도 게이지 행이 항상 가운데 오도록 center 정렬
+        let column = UIStackView(arrangedSubviews: [row, volumeSourceLabel, volumeHintLabel])
+        column.axis = .vertical
+        column.alignment = .center
+        column.spacing = Self.volumeColumnSpacing
+        column.translatesAutoresizingMaskIntoConstraints = false
+        volumeHUD.addSubview(column)
+
+        NSLayoutConstraint.activate([
+            // 상단 메타 오버레이(좌측, 최대 폭 800)·해상도 라벨(우측)과 같은 밴드에 두면 겹치므로
+            // 메타 오버레이 바로 아래 밴드에 건다.
+            volumeHUD.topAnchor.constraint(equalTo: topMetaOverlay.bottomAnchor, constant: DS.Spacing.md),
+            volumeHUD.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+
+            column.topAnchor.constraint(equalTo: volumeHUD.topAnchor, constant: DS.Spacing.sm),
+            column.bottomAnchor.constraint(equalTo: volumeHUD.bottomAnchor, constant: -DS.Spacing.sm),
+            column.leadingAnchor.constraint(equalTo: volumeHUD.leadingAnchor, constant: DS.Spacing.md),
+            column.trailingAnchor.constraint(equalTo: volumeHUD.trailingAnchor, constant: -DS.Spacing.md),
+        ])
+    }
+
+    private func showVolumeHUD(source: VolumeSource) {
+        // 에러 카드 위로 HUD가 떠오르지 않도록
+        guard errorContainer == nil else { return }
+
+        let level: Float
+        let muted: Bool
+
+        switch source {
+        case .app:
+            muted = avVC?.player?.isMuted ?? false
+            level = muted ? 0 : (avVC?.player?.volume ?? 0)
+            volumeSourceLabel.text = "앱 음량"
+            // 물리 음량 버튼과 인앱 음량이 다른 것이라는 안내는 재생 세션당 한 번만.
+            volumeHintLabel.isHidden = didShowVolumeHint
+            didShowVolumeHint = true
+        case .system:
+            muted = false
+            level = AVAudioSession.sharedInstance().outputVolume
+            volumeSourceLabel.text = "시스템 음량"
+            volumeHintLabel.isHidden = true
+        }
+
+        let filled = Int((level * Float(Self.volumeSegmentCount)).rounded())
+        for (index, segment) in volumeSegments.enumerated() {
+            segment.backgroundColor = index < filled ? DS.Colors.textPrimary : DS.Colors.volumeSegmentEmpty
+        }
+        // 시스템 음량은 10% 단위가 아니므로 라벨은 실제 값으로, 게이지만 세그먼트로 양자화
+        volumeValueLabel.text = muted ? "음소거" : "\(Int((level * 100).rounded()))%"
+        let iconName = muted ? "speaker.slash.fill" : (filled == 0 ? "speaker.fill" : "speaker.wave.2.fill")
+        volumeIconView.image = UIImage(systemName: iconName)
+
+        hideVolumeHUDTimer?.invalidate()
+        UIView.animate(withDuration: 0.15) { self.volumeHUD.alpha = 1 }
+        // 한 번만 뜨는 안내문은 읽을 시간을 더 준다
+        let dwell = volumeHintLabel.isHidden ? Self.volumeHUDDwell : Self.volumeHintDwell
+        hideVolumeHUDTimer = Timer.scheduledTimer(withTimeInterval: dwell, repeats: false) { [weak self] _ in
+            UIView.animate(withDuration: 0.4) { self?.volumeHUD.alpha = 0 }
+        }
+    }
+
     // MARK: - 재생 시작
 
     private func startPlayback() {
@@ -292,8 +538,14 @@ final class PlayerViewController: UIViewController {
         vc.didMove(toParent: self)
         avVC = vc
 
-        // 해상도 라벨을 가장 위로
+        // 해상도 라벨 / 음량 HUD를 가장 위로
         view.bringSubviewToFront(resolutionLabel)
+        view.bringSubviewToFront(volumeHUD)
+
+        // 지난 재생에서 쓰던 인앱 음량 복원(+ 다시 시도 시 음소거 유지) + 트랜스포트 바 음량 컨트롤 부착
+        player.volume = Self.savedVolume()
+        player.isMuted = pendingMuted
+        vc.transportBarCustomMenuItems = makeTransportBarItems()
 
         // 최고 변종 선택 강제 — SD(360p) 대신 HD(540p) 골라지도록
         // SOOP는 비구독자에게 master playlist에 HD(540p) + SD(360p) 변종만 제공함
@@ -308,12 +560,18 @@ final class PlayerViewController: UIViewController {
                 guard let self = self else { return }
                 switch it.status {
                 case .readyToPlay:
-                    UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 }
+                    UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 } completion: { _ in
+                        self.handOffFocusToPlayer()
+                    }
                     self.hidePreRoll()
                     player.play()
                     print("[Player] readyToPlay → playing")
                     self.startObservingResolution(item: it)
                     self.showTopMetaTemporarily()
+                    // 복원된 인앱 음량이 100%가 아니거나 음소거면 이유 없이 조용하지 않도록 한 번 보여 준다
+                    if player.volume < 1 || player.isMuted {
+                        self.showVolumeHUD(source: .app)
+                    }
                 case .failed:
                     let err = it.error
                     print("[Player] FAILED: \(String(describing: err))")
@@ -444,10 +702,15 @@ final class PlayerViewController: UIViewController {
                 guard let self = self else { return }
                 switch it.status {
                 case .readyToPlay:
-                    UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 }
+                    UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 } completion: { _ in
+                        self.handOffFocusToPlayer()
+                    }
                     self.hidePreRoll()
                     self.startObservingResolution(item: it)
                     self.showTopMetaTemporarily()
+                    if let player = self.avVC?.player, player.volume < 1 || player.isMuted {
+                        self.showVolumeHUD(source: .app)
+                    }
                 case .failed:
                     print("[Player] Fallback FAILED: \(String(describing: it.error))")
                     self.showError(
@@ -551,6 +814,9 @@ final class PlayerViewController: UIViewController {
         errorContainer = container
         preRollSpinner.stopAnimating()
         preRollSpinner.isHidden = true
+        // 카드 뒤의 플레이어가 방향 이동으로 포커스를 가져가지 않도록 숨기고, 카드로 포커스 이동
+        avVC?.view.alpha = 0
+        requestFocus(on: container)
     }
 
     @objc private func retryTapped() {
@@ -570,6 +836,7 @@ final class PlayerViewController: UIViewController {
 
     /// v3.2: 현재 AVPlayer/AVPlayerViewController/observer를 모두 정리
     private func tearDownAVPlayer() {
+        pendingMuted = avVC?.player?.isMuted ?? false
         observer?.invalidate()
         observer = nil
         presentationObserver?.invalidate()
@@ -587,20 +854,73 @@ final class PlayerViewController: UIViewController {
         dismiss(animated: true)
     }
 
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed || isMovingFromParent {
+            deactivateAudioSession()
+        }
+    }
+
+    // MARK: - 포커스
+
+    /// AVPlayerViewController는 alpha 0으로 삽입되므로 초기 포커스 대상이 될 수 없다.
+    /// 페이드인 후 명시적으로 포커스를 넘겨야 트랜스포트 바(= 음량 컨트롤)를 열 수 있다.
+    private func handOffFocusToPlayer() {
+        guard let avVC = avVC else { return }
+        requestFocus(on: avVC)
+    }
+
+    /// setNeedsFocusUpdate()는 "이 환경이 현재 포커스 항목을 포함하지 않으면 아무 효과가 없다"
+    /// (UIFocus.h). 프리롤 단계에는 포커스 가능한 뷰가 없어 그 전제가 깨지므로,
+    /// 전제 조건이 없는 UIFocusSystem.requestFocusUpdate(to:)를 쓴다.
+    private func requestFocus(on environment: UIFocusEnvironment) {
+        guard let focusSystem = UIFocusSystem.focusSystem(for: self) else { return }
+        focusSystem.requestFocusUpdate(to: environment)
+        focusSystem.updateFocusIfNeeded()
+    }
+
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let errorContainer = errorContainer {
+            return [errorContainer]
+        }
+        if let avVC = avVC, avVC.view.alpha > 0 {
+            return [avVC]
+        }
+        return super.preferredFocusEnvironments
+    }
+
     deinit {
         observer?.invalidate()
         presentationObserver?.invalidate()
+        systemVolumeObservation?.invalidate()
         hideResolutionTimer?.invalidate()
         hideMetaTimer?.invalidate()
+        hideVolumeHUDTimer?.invalidate()
         avVC?.player?.pause()
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             if press.type == .menu {
-                avVC.player?.pause()
-                dismiss(animated: true)
+                // avVC는 startPlayback이 조기 반환하면 nil일 수 있다 (강제 언래핑 크래시 방지).
+                backTapped()
                 return
+            }
+            // 외부 HID 키보드·리모컨의 음량 키 (Siri Remote 버튼은 오지 않음 — 상단 주석 참고)
+            if let keyCode = press.key?.keyCode {
+                switch keyCode {
+                case .keyboardVolumeUp:
+                    stepVolume(by: Self.volumeStep)
+                    return
+                case .keyboardVolumeDown:
+                    stepVolume(by: -Self.volumeStep)
+                    return
+                case .keyboardMute:
+                    toggleMute()
+                    return
+                default:
+                    break
+                }
             }
         }
         // 사용자가 리모컨을 만지면 해상도 라벨 + 상단 메타 잠시 표시
