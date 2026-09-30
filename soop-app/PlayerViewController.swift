@@ -12,8 +12,9 @@ import AVFoundation
 // UI v2:
 //   • Pre-roll: 블러 썸네일 + 방송 제목 + BJ + 스피너
 //   • 해상도 라벨 자동 페이드 (4초 후 사라짐)
-//   • FALLBACK → "안정 모드" 한글
+//   • FALLBACK(view_url+aid) 스왑은 화면에 드러내지 않는다 — 배지는 실제 화질만 (v6)
 //   • 실패 시 에러 카드 (다시 시도/돌아가기)
+//   • 트랜스포트 바 '화질' 메뉴 + 우상단 화질 배지 (v6)
 
 final class PlayerViewController: UIViewController {
 
@@ -91,6 +92,19 @@ final class PlayerViewController: UIViewController {
     private var didShowVolumeHint = false
     /// 다시 시도로 AVPlayer를 새로 만들 때 음소거 상태를 이어 준다 (세션 범위, 저장하지 않음)
     private var pendingMuted = false
+
+    // v6: 화질 선택 — 0 = 자동, 그 외 = 짧은 변 등급(360/540/720/1080). 방송이 바뀌어도 유지한다(음량과 같은 방식).
+    private static let qualityDefaultsKey = "soop.player.quality"
+    private var qualityChoice: Int {
+        get { UserDefaults.standard.integer(forKey: Self.qualityDefaultsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.qualityDefaultsKey) }
+    }
+    /// 화질 메뉴 행 — 재생 중 master에 실제로 있는 등급(높은 것부터). 등급이 2개 미만이면 비어 있고 메뉴는 '자동'만.
+    private var qualityOptions: [Int] = []
+    /// 화질 메뉴 행 인스턴스(키 0 = 자동). 체크·부제는 이 인스턴스를 제자리에서 바꾼다.
+    private var qualityActions: [Int: UIAction] = [:]
+    /// 트랜스포트 바 음량 항목 — AVPlayerViewController마다 한 번 만들어 화질 메뉴를 바꿀 때도 같은 인스턴스를 쓴다.
+    private var volumeMenuItems: [UIMenuElement] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -277,6 +291,8 @@ final class PlayerViewController: UIViewController {
     }
 
     private func showResolutionLabelTemporarily() {
+        // 화질을 올리려고 item을 바꾼 직후처럼 첫 프레임 전이면 직전 item의 글자가 보이므로 띄우지 않는다
+        guard currentQualityBucket() > 0 else { return }
         hideResolutionTimer?.invalidate()
         UIView.animate(withDuration: 0.2) {
             self.resolutionLabel.alpha = 1
@@ -353,6 +369,52 @@ final class PlayerViewController: UIViewController {
             self?.toggleMute()
         }
         return [down, up, mute]
+    }
+
+    /// 트랜스포트 바 '화질' 메뉴 — '자동' + 재생 중 master에 실제로 있는 화질만.
+    /// 최상위 UIMenu는 image가 없으면 버튼이 생기지 않는다. 행 제목은 고정이고 체크·부제는 syncQualityMenu가 맞춘다.
+    private func makeQualityMenu() -> UIMenu {
+        qualityActions = [:]
+        let actions = ([0] + qualityOptions).map { q -> UIAction in
+            let action = UIAction(title: q == 0 ? "자동" : QualityLadder.label(q)) { [weak self] _ in
+                self?.selectQuality(q)
+            }
+            qualityActions[q] = action
+            return action
+        }
+        syncQualityMenu()
+        return UIMenu(title: "화질", image: UIImage(systemName: "gearshape"), options: .singleSelection, children: actions)
+    }
+
+    /// 체크(적용 중인 행)와 체크 행의 부제('현재 X')를 보관한 인스턴스에서 제자리로 맞춘다(다음에 열 때 반영).
+    /// .singleSelection의 체크 자동 이동에는 기대지 않는다(tvOS 17~25에서 확인하지 못함).
+    private func syncQualityMenu() {
+        let checked = QualityLadder.effective(choice: qualityChoice, options: qualityOptions)
+        let actual = currentQualityBucket()
+        for (q, action) in qualityActions {
+            action.state = q == checked ? .on : .off
+            action.subtitle = q == checked ? QualityLadder.rowSubtitle(row: q, actual: actual) : nil
+        }
+    }
+
+    /// 고른 화질을 저장하고 적용한다. 내리기는 재생 중 item의 상한만 바꾼다(끊김 없음).
+    /// 올리기는 상한만 올려서는 AVPlayer가 한 번 내려간 SOOP variant로 다시 오르지 않아(선언 대역폭 과소 -12318,
+    /// docs/20260930-quality-selection-v1.md §2-7) 같은 URL로 item을 새로 만든다. 같은 행을 다시 골라도 이 규칙으로 복구된다.
+    private func selectQuality(_ q: Int) {
+        // 체크가 옮겨 갈 때만 저장한다 — 체크된 행을 다시 고르는 복구가 대체 중인 선호(예: 1080p)를 지우지 않게
+        qualityChoice = QualityLadder.choice(afterPicking: q, saved: qualityChoice, options: qualityOptions)
+        guard let item = avVC?.player?.currentItem else { return }
+        // 제자리로 내린 직후에는 화면이 아직 이전 등급이다(1.6~3.8초). 걸린 상한과 비교해 낮은 쪽을 실제로 본다.
+        let actual = min(currentQualityBucket(), QualityLadder.ceiling(forCap: item.preferredMaximumResolution))
+        if actual > 0, QualityLadder.target(choice: q, options: qualityOptions) > actual,
+           let url = (item.asset as? AVURLAsset)?.url {
+            // 메뉴 핸들러 안에서 item을 바꾸다 포커스 갱신 중 크래시한 보고가 있어 다음 런루프로 미룬다.
+            // 체크·부제는 교체 직후, 배지는 새 item의 첫 프레임에서 맞춘다.
+            DispatchQueue.main.async { [weak self] in self?.swapPlayerURL(url, qualityReload: true) }
+            return
+        }
+        applyQualityCap(to: item)
+        updateQualityLabel(show: true)
     }
 
     private func stepVolume(by delta: Float) {
@@ -524,10 +586,12 @@ final class PlayerViewController: UIViewController {
         let options: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": headers]
         let asset = AVURLAsset(url: info.viewURL, options: options)
         let item = AVPlayerItem(asset: asset)
+        applyQualityCap(to: item)   // 저장한 화질을 첫 variant 선택 전에 건다(플레이어에 붙이기 전)
         let player = AVPlayer(playerItem: item)
 
         let vc = AVPlayerViewController()
         vc.player = player
+        vc.delegate = self   // Menu로 플레이어를 닫을 때를 AVKit이 알려 준다(playerViewControllerShouldDismiss)
         vc.videoGravity = .resizeAspect
         vc.view.frame = view.bounds
         vc.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -542,17 +606,14 @@ final class PlayerViewController: UIViewController {
         view.bringSubviewToFront(resolutionLabel)
         view.bringSubviewToFront(volumeHUD)
 
-        // 지난 재생에서 쓰던 인앱 음량 복원(+ 다시 시도 시 음소거 유지) + 트랜스포트 바 음량 컨트롤 부착
+        // 지난 재생에서 쓰던 인앱 음량 복원(+ 다시 시도 시 음소거 유지) + 트랜스포트 바 음량·화질 컨트롤 부착
         player.volume = Self.savedVolume()
         player.isMuted = pendingMuted
-        vc.transportBarCustomMenuItems = makeTransportBarItems()
-
-        // 최고 변종 선택 강제 — SD(360p) 대신 HD(540p) 골라지도록
-        // SOOP는 비구독자에게 master playlist에 HD(540p) + SD(360p) 변종만 제공함
-        item.preferredPeakBitRate = 0  // 0 = 무제한 (최고 변종 자동 선택)
-        if #available(tvOS 11.0, *) {
-            item.preferredMaximumResolution = CGSize(width: 1920, height: 1080)
-        }
+        // 화질 메뉴는 '자동'만으로 먼저 붙이고, variant를 읽으면 목록을 채운다(보통 프리롤 중에 끝남)
+        qualityOptions = []
+        volumeMenuItems = makeTransportBarItems()
+        vc.transportBarCustomMenuItems = volumeMenuItems + [makeQualityMenu()]
+        loadQualityOptions(for: item)
 
         // 플레이어 상태 관찰 — 실패 시 fallback
         observer = item.observe(\.status, options: [.new]) { [weak self] it, _ in
@@ -590,22 +651,70 @@ final class PlayerViewController: UIViewController {
                 guard let self = self else { return }
                 let size = it.presentationSize
                 guard size.width > 0, size.height > 0 else { return }
-                let w = Int(size.width)
-                let h = Int(size.height)
-                // v3: 시청자가 즉시 이해 가능한 직접 표기
-                let quality: String
-                switch h {
-                case ...360:  quality = "360p"
-                case ...540:  quality = "540p"
-                case ...720:  quality = "720p"
-                case ...1080: quality = "1080p"
-                case ...1440: quality = "1440p"
-                default:      quality = "4K"
-                }
-                self.resolutionLabel.text = " \(quality) "
-                self.showResolutionLabelTemporarily()
-                print("[Player] presentationSize: \(w)x\(h) (\(quality))")
+                self.updateQualityLabel(show: true)
+                print("[Player] presentationSize: \(Int(size.width))x\(Int(size.height)) (\(QualityLadder.label(QualityLadder.bucket(for: size))))")
             }
+        }
+    }
+
+    /// 지금 디코딩 중인 화질의 짧은 변 등급. 첫 프레임 전이면 0.
+    private func currentQualityBucket() -> Int {
+        guard let size = avVC?.player?.currentItem?.presentationSize, size.width > 0, size.height > 0 else { return 0 }
+        return QualityLadder.bucket(for: size)
+    }
+
+    /// 화질 배지 — 1줄째는 실제 화질, 2줄째는 체크된 수동 행(대체 행 포함)과 실제가 다를 때만. 메뉴의 체크·부제도 함께 맞춘다.
+    private func updateQualityLabel(show: Bool) {
+        syncQualityMenu()
+        let actual = currentQualityBucket()
+        guard actual > 0 else { return }
+        let lines = QualityLadder.badgeLines(actual: actual, choice: qualityChoice, options: qualityOptions)
+        let centered = NSMutableParagraphStyle()
+        centered.alignment = .center
+        let text = NSMutableAttributedString(string: " \(lines.first) ", attributes: [
+            .font: DS.Typography.cardTitle, .foregroundColor: DS.Colors.textPrimary, .paragraphStyle: centered,
+        ])
+        if let second = lines.second {
+            text.append(NSAttributedString(string: "\n \(second) ", attributes: [
+                .font: DS.Typography.caption, .foregroundColor: DS.Colors.textSecondary, .paragraphStyle: centered,
+            ]))
+        }
+        resolutionLabel.attributedText = text
+        if show { showResolutionLabelTemporarily() }
+    }
+
+    /// 저장한 화질을 item의 해상도 상한으로 건다. 상한일 뿐이라 망이 느리면 AVPlayer가 더 낮은 화질로 내려간다.
+    private func applyQualityCap(to item: AVPlayerItem) {
+        item.preferredPeakBitRate = 0
+        item.preferredMaximumResolution = QualityLadder.cap(for: qualityChoice)
+        print("[Player] quality \(qualityChoice == 0 ? "auto" : "\(qualityChoice)p") → cap \(Int(item.preferredMaximumResolution.width))")
+    }
+
+    /// item의 master에 실제로 있는 variant로 화질 메뉴 목록을 만든다(서버가 넣어 준 것만).
+    /// item을 만든 직후 부르므로 보통 프리롤 중(바에 닿을 수 없을 때) 끝난다. 목록이 같으면 재할당하지 않는다.
+    private func loadQualityOptions(for item: AVPlayerItem) {
+        guard let asset = item.asset as? AVURLAsset else { return }
+        Task { @MainActor [weak self] in
+            let variants: [AVAssetVariant]
+            do {
+                variants = try await asset.load(.variants)
+            } catch {
+                // TS(구독자 타임머신)는 401/403으로 여기서 실패한다. 메뉴는 그대로 두고 스왑된 item에서 다시 읽는다.
+                print("[Player] variants: load failed (\((error as NSError).code)) — menu kept")
+                return
+            }
+            let sizes = variants.compactMap { $0.videoAttributes?.presentationSize }
+            let options = QualityLadder.options(from: sizes)
+            let summary = "\(sizes.map { "\(Int($0.width))x\(Int($0.height))" }) → options \(options)"
+            guard let self, let avVC = self.avVC, avVC.player?.currentItem === item else {
+                print("[Player] variants: \(summary) (stale)")
+                return
+            }
+            print("[Player] variants: \(summary)")
+            guard options != self.qualityOptions else { return }
+            self.qualityOptions = options
+            avVC.transportBarCustomMenuItems = self.volumeMenuItems + [self.makeQualityMenu()]
+            self.updateQualityLabel(show: false)
         }
     }
 
@@ -660,7 +769,9 @@ final class PlayerViewController: UIViewController {
         }
     }
 
-    private func swapPlayerURL(_ url: URL) {
+    /// - parameter qualityReload: 화질을 올리려고 같은 URL로 item만 새로 만드는 경우. 재생 중 교체라 프리롤 숨기기·페이드인·
+    ///   상단 메타·음량 HUD·포커스 넘기기를 하지 않고, 일시정지 중이었으면 그대로 둔다. 실패하면 아직 폴백 전이면 폴백, 아니면 에러 카드.
+    private func swapPlayerURL(_ url: URL, qualityReload: Bool = false) {
         // sooplive 쿠키 + Referer/Origin 헤더
         var cookieHeader = ""
         let allCookies = HTTPCookieStorage.shared.cookies ?? []
@@ -677,24 +788,28 @@ final class PlayerViewController: UIViewController {
         }
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
-        item.preferredPeakBitRate = 0
-        if #available(tvOS 11.0, *) {
-            item.preferredMaximumResolution = CGSize(width: 1920, height: 1080)
-        }
+        applyQualityCap(to: item)
 
         // 이전 observer 교체 (NSKeyValueObservation 재할당 시 자동 해제되지만 명시적 처리)
         observer?.invalidate()
         presentationObserver?.invalidate()
 
+        // 화면이 새 item으로 넘어가는 동안 직전 item의 배지가 남지 않게 바로 숨긴다(첫 프레임에서 다시 뜬다)
+        hideResolutionTimer?.invalidate()
+        resolutionLabel.alpha = 0
+
+        let keepPaused = qualityReload && avVC.player?.timeControlStatus == .paused
         avVC.player?.replaceCurrentItem(with: item)
-        avVC.player?.play()
+        if !keepPaused { avVC.player?.play() }
+        syncQualityMenu()   // 실제를 모르는 동안은 체크 행의 '현재 X' 부제를 비운다
+        loadQualityOptions(for: item)
 
-        // 안정 모드 라벨
-        resolutionLabel.text = " 안정 모드 "
-        showResolutionLabelTemporarily()
-        print("[Player] swapPlayerURL → fallback URL: \(url.absoluteString.prefix(140))")
-
-        preRollStatusLabel.text = "안정 모드로 재시도 중..."
+        if qualityReload {
+            startObservingResolution(item: item)   // 첫 프레임이 readyToPlay보다 먼저 올 수 있다
+            print("[Player] quality reload — same URL, new item")
+        } else {
+            print("[Player] swapPlayerURL → fallback URL: \(url.absoluteString.prefix(140))")
+        }
 
         // fallback 아이템에도 상태·해상도 KVO 부착
         observer = item.observe(\.status, options: [.new]) { [weak self] it, _ in
@@ -702,6 +817,7 @@ final class PlayerViewController: UIViewController {
                 guard let self = self else { return }
                 switch it.status {
                 case .readyToPlay:
+                    guard !qualityReload else { return }
                     UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 } completion: { _ in
                         self.handOffFocusToPlayer()
                     }
@@ -712,7 +828,12 @@ final class PlayerViewController: UIViewController {
                         self.showVolumeHUD(source: .app)
                     }
                 case .failed:
-                    print("[Player] Fallback FAILED: \(String(describing: it.error))")
+                    print("[Player] \(qualityReload ? "Quality reload" : "Fallback") FAILED: \(String(describing: it.error))")
+                    // primary를 같은 URL로 바꾼 것뿐이면 primary 실패와 같이 한 번 폴백한다(기존 자동 복구 유지)
+                    if qualityReload, !self.didFallback, let info = self.streamInfo {
+                        self.tryFallback(info: info, originalError: it.error)
+                        return
+                    }
                     self.showError(
                         title: "재생할 수 없습니다",
                         description: "네트워크 또는 방송 상태를 확인하세요"
@@ -854,6 +975,12 @@ final class PlayerViewController: UIViewController {
         dismiss(animated: true)
     }
 
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // 프리롤·에러 카드의 Menu는 UIKit 모달 닫기로 끝나 backTapped()를 거치지 않는다. 어느 경로로 닫혀도 소리가 남지 않게 멈춘다.
+        if isBeingDismissed { avVC?.player?.pause() }
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         if isBeingDismissed || isMovingFromParent {
@@ -902,8 +1029,10 @@ final class PlayerViewController: UIViewController {
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             if press.type == .menu {
-                // avVC는 startPlayback이 조기 반환하면 nil일 수 있다 (강제 언래핑 크래시 방지).
-                backTapped()
+                // 누르는 순간 닫지 않는다 — 재생 화면에서는 AVKit이 팝업·바를 한 단계씩 닫고 마지막에
+                // playerViewControllerShouldDismiss로 요청한다. 프리롤·에러 카드에서는 UIKit 모달 닫기가 처리한다(둘 다 누름은 취소로 끝남).
+                // 아무도 쓰지 않은 누름만 pressesEnded에서 닫는다(tvOS 26.5에서는 관측되지 않은 대비 경로).
+                menuPressBeganHere = true
                 return
             }
             // 외부 HID 키보드·리모컨의 음량 키 (Siri Remote 버튼은 오지 않음 — 상단 주석 참고)
@@ -929,5 +1058,111 @@ final class PlayerViewController: UIViewController {
             showTopMetaTemporarily()
         }
         super.pressesBegan(presses, with: event)
+    }
+
+    /// Menu를 여기서 누르기 시작했는지. AVKit이 팝업·바를 닫는 데 쓴 누름은 pressesCancelled로 끝나 종료로 이어지지 않는다.
+    private var menuPressBeganHere = false
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .menu }) {
+            if menuPressBeganHere {
+                menuPressBeganHere = false
+                // avVC는 startPlayback이 조기 반환하면 nil일 수 있다 (강제 언래핑 크래시 방지).
+                backTapped()
+            }
+            return
+        }
+        super.pressesEnded(presses, with: event)
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .menu }) {
+            menuPressBeganHere = false
+            return
+        }
+        super.pressesCancelled(presses, with: event)
+    }
+}
+
+extension PlayerViewController: AVPlayerViewControllerDelegate {
+    /// 화질 팝업 → 트랜스포트 바를 닫고 난 뒤의 Menu는 AVKit이 '플레이어 닫기'로 판단해 여기로 묻는다.
+    /// 우리 AVPlayerViewController는 자식으로 끼워 넣은 것이라 스스로 닫히지 못하므로
+    /// (AVPlayerViewController.h의 playerViewControllerShouldDismiss 설명) 플레이어 화면을 직접 닫는다.
+    func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
+        print("[Player] AVKit asks to dismiss (Menu with nothing to close)")
+        backTapped()
+        return false
+    }
+}
+
+// MARK: - 화질 규칙 (순수 로직 — UIKit·AVFoundation 없이 macOS에서도 컴파일된다. 규칙 검증은 이 MARK부터 파일 끝까지 잘라 쓰므로
+// 파일 끝에 둔다 — docs/20260930-quality-selection-v1.md §5-2)
+
+/// 0 = 자동, 그 외 = 짧은 변 등급(360/540/720/1080).
+enum QualityLadder {
+    /// 짧은 변 기준 등급 — 기존 해상도 라벨의 경계값을 그대로 쓴다(세로 1080x1920도 1080p).
+    static func bucket(for size: CGSize) -> Int {
+        switch Int(min(size.width, size.height)) {
+        case ...360:  return 360
+        case ...540:  return 540
+        case ...720:  return 720
+        case ...1080: return 1080
+        case ...1440: return 1440
+        default:      return 2160
+        }
+    }
+
+    static func label(_ bucket: Int) -> String { bucket == 2160 ? "4K" : "\(bucket)p" }
+
+    /// 메뉴 행: master에 실제로 있는 1080p 이하 등급, 높은 것부터(중복 제거).
+    /// 2개 미만이면 고를 것이 없으므로 비운다 — 효과 없는 선택이 전역 저장값이 되지 않게(메뉴는 '자동'만).
+    static func options(from sizes: [CGSize]) -> [Int] {
+        let buckets = Set(sizes.filter { $0.width > 0 && $0.height > 0 }.map(bucket(for:)).filter { $0 <= 1080 }).sorted(by: >)
+        return buckets.count >= 2 ? buckets : []
+    }
+
+    /// 체크할 행: 고른 화질이 이 방송에 없으면 그 이하 중 가장 높은 것, 그것도 없으면 가장 낮은 것
+    /// (= AVPlayer가 cap(for: choice)에서 실제로 고르는 것). 행이 없으면 '자동'. 저장값은 바꾸지 않는다.
+    static func effective(choice: Int, options: [Int]) -> Int {
+        guard choice != 0, let lowest = options.last else { return 0 }
+        return options.first { $0 <= choice } ?? lowest
+    }
+
+    /// 선택을 적용했을 때 기대하는 등급: 수동이면 체크 행, 자동이면 가장 높은 행(행이 없으면 0).
+    static func target(choice: Int, options: [Int]) -> Int {
+        choice == 0 ? (options.first ?? 0) : effective(choice: choice, options: options)
+    }
+
+    /// 행을 고른 뒤 저장할 값: 체크가 옮겨 갈 때만 그 행, 이미 체크된 행을 다시 고르면 저장값 그대로.
+    static func choice(afterPicking row: Int, saved: Int, options: [Int]) -> Int {
+        row == effective(choice: saved, options: options) ? saved : row
+    }
+
+    /// preferredMaximumResolution은 가로·세로를 각각 비교하므로 정사각형으로 건다(가로·세로 방송 공통).
+    /// SOOP 사다리는 16:9(세로 방송은 9:16)라는 실측을 전제로 한다 — 4:3 사다리라면 한 등급 위까지 통과한다.
+    /// 자동은 1080p 등급까지 — 가로 방송은 기존 1920x1080 상한과 같은 variant만 허용한다.
+    static func cap(for choice: Int) -> CGSize {
+        let side = CGFloat((choice == 0 ? 1080 : choice) * 16 / 9)
+        return CGSize(width: side, height: side)
+    }
+
+    /// cap(for:)로 건 상한이 허용하는 최고 등급(상한이 없으면 제한 없음).
+    static func ceiling(forCap cap: CGSize) -> Int {
+        cap.width > 0 ? Int(cap.width) * 9 / 16 : Int.max
+    }
+
+    /// 배지 문구 — 팝업의 체크 행을 줄인 것. 1줄 = 실제 화질(자동이면 '자동(X)'),
+    /// 2줄 = 수동 행이 체크돼 있는데 실제가 다를 때만 '{체크 행} 선택됨'(팝업의 '✓ 행 / 현재 X'와 같은 내용).
+    static func badgeLines(actual: Int, choice: Int, options: [Int]) -> (first: String, second: String?) {
+        let checked = effective(choice: choice, options: options)
+        if checked == 0 { return ("자동(\(label(actual)))", nil) }
+        if actual != checked { return (label(actual), "\(label(checked)) 선택됨") }
+        return (label(actual), nil)
+    }
+
+    /// 체크 행의 부제: '자동'이면 늘 '현재 X', 수동 행이면 실제가 다를 때만. 실제를 모르면 없음.
+    static func rowSubtitle(row: Int, actual: Int) -> String? {
+        guard actual > 0, row == 0 || row != actual else { return nil }
+        return "현재 \(label(actual))"
     }
 }

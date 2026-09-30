@@ -63,8 +63,10 @@ enum SOOPAPIError: Error {
     case decodingFailed(String)
     case streamUnavailable(String)
     case notLive
-    /// SOOP `RESULT=-6` — 19+ 방송에 인증 미통과. AbroadChk=FAIL 쿠키 보유 상태.
+    /// SOOP `RESULT=-6`/`-8` — 세션을 갱신해 재시도했는데도 막혔다. 계정에 성인 시청 권한이 없는 경우로 본다.
     case adultVerificationRequired
+    /// SOOP `RESULT=-6`/`-8`에서 세션을 갱신하려 했으나 자격증명이 거부됐거나 없다(만료인지 계정 권한인지 가릴 수 없다).
+    case loginRequired
     /// 비밀번호 방송(BPWD=Y)인데 비밀번호가 아직 입력되지 않음. UI에서 비번을 받아 재시도해야 함.
     case passwordRequired
     /// 비밀번호를 입력했으나 서버가 AID를 발급하지 않음(비번 불일치).
@@ -125,15 +127,15 @@ final class SOOPAPIClient {
             let parts = pair.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 2 else { continue }
             let name = parts[0], value = parts[1]
-            // AbroadChk/AbroadVod 의 FAIL 값은 SOOP의 지역·연령 접근 차단 플래그이며 sticky 하다.
-            // 매 실행마다 이걸 주입하면 player_live_api.php 가 RESULT=-6 으로 막히므로 주입 제외.
+            // 오래된 AbroadChk/AbroadVod=FAIL 은 주입하지 않는다. (19+ 차단의 원인은 아니다 — clearStaleAbroadFail 참고)
             if (name == "AbroadChk" || name == "AbroadVod"), value.uppercased().contains("FAIL") {
                 print("[SOOPAPI] skip injecting stale block flag \(name)=\(value)")
                 continue
             }
             // 로그인·즐겨찾기 API는 sooplive.co.kr, 스트리밍/검색은 sooplive.com 이라
             // 두 도메인 모두에 심어야 한다. (.co.kr 이 빠지면 myapi 호출에 쿠키가 실리지 않음)
-            for domain in [".sooplive.com", "sooplive.com", ".sooplive.co.kr", "sooplive.co.kr"] {
+            // host-only 형태는 넣지 않는다 — 옛 값이 미러링으로 새 세션을 덮었다(docs/20260924-adult-and-password-rooms-v1.md).
+            for domain in [".sooplive.com", ".sooplive.co.kr"] {
                 let props: [HTTPCookiePropertyKey: Any] = [
                     .name: name,
                     .value: value,
@@ -156,11 +158,13 @@ final class SOOPAPIClient {
     /// 등록 도메인이 달라 쿠키가 교차 전송되지 않는다. 그래서 로그인/연령확인된 세션이
     /// player_live_api.php 에 전혀 도달하지 못해 RESULT=-6 이 나온다.
     /// .sooplive.co.kr 에 저장된 쿠키를 .sooplive.com 으로 그대로 복제해 세션을 잇는다.
+    ///
+    /// 소스는 `.sooplive.co.kr` 정확히 일치만 — host-only 사본(옛 빌드가 디스크에 남긴 것)까지 잡으면 옛 값이 이길 수 있다.
     static func mirrorAuthCookiesToStreamingDomain() {
         let store = HTTPCookieStorage.shared
         guard let all = store.cookies else { return }
         var mirrored = 0
-        for c in all where c.domain.contains("sooplive.co.kr") {
+        for c in all where c.domain == ".sooplive.co.kr" {
             var props: [HTTPCookiePropertyKey: Any] = [
                 .name: c.name,
                 .value: c.value,
@@ -177,8 +181,8 @@ final class SOOPAPIClient {
         print("[SOOPAPI] mirrored \(mirrored) auth cookies .co.kr → .sooplive.com")
     }
 
-    /// 앱이 .env로 심었거나 play 페이지가 찍은 stale 한 AbroadChk/AbroadVod=FAIL 쿠키 제거.
-    /// FAIL 은 sticky 해서 한번 박히면 이후 player_live_api.php 호출을 계속 막는다.
+    /// 로그인 응답·play 페이지 등이 심는 AbroadChk/AbroadVod=FAIL 쿠키 제거.
+    /// 19+ 차단의 원인은 아니다(유효한 AuthTicket과 함께 보내면 RESULT=1, 2026-09-26 실측). 제거는 무해해 유지한다.
     static func clearStaleAbroadFail() {
         let store = HTTPCookieStorage.shared
         for c in store.cookies ?? [] where (c.name == "AbroadChk" || c.name == "AbroadVod") {
@@ -194,12 +198,47 @@ final class SOOPAPIClient {
     // yt-dlp #11266 패턴 그대로. .env의 SOOP_ID / SOOP_PASSWORD 로 POST 로그인.
     // 성공 시 AuthTicket·UserTicket·BbsTicket 등이 HTTPCookieStorage.shared 에 저장됨.
 
+    private var hasLoggedInOnce = false
+    /// 서버가 .env의 ID/PW를 거부했거나 ID/PW가 없다. .env는 실행 중 바뀌지 않으므로 이 실행 동안 다시 POST하지 않는다.
+    private var credentialsUnusable = false
+    private let loginLock = NSLock()
+
+    private var credentialsUnusableLocked: Bool {
+        loginLock.lock(); defer { loginLock.unlock() }
+        return credentialsUnusable
+    }
+
+    private func markCredentialsUnusable() {
+        loginLock.lock(); credentialsUnusable = true; loginLock.unlock()
+    }
+
     /// .env에서 ID/PW 읽어 로그인 시도. 결과는 콜백.
     /// - completion: success=true이면 로그인 성공, 쿠키가 세션에 저장됨.
     func login(completion: @escaping (Bool, String?) -> Void) {
+        if credentialsUnusableLocked {
+            completion(false, "credentials rejected earlier in this run")
+            return
+        }
+        performLogin { ok, err in
+            self.loginLock.lock()
+            // 알림은 첫 성공 때만 — 재로그인마다 보내면 HOME/MY가 목록을 다시 불러 포커스가 튄다.
+            let isFirstSuccess = ok && !self.hasLoggedInOnce
+            if ok { self.hasLoggedInOnce = true }
+            self.loginLock.unlock()
+            if isFirstSuccess {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .soopLoginSucceeded, object: nil)
+                }
+            }
+            completion(ok, err)
+        }
+    }
+
+    private func performLogin(completion: @escaping (Bool, String?) -> Void) {
         guard let creds = Self.loadCredentialsFromEnv(),
               !creds.id.isEmpty, !creds.pw.isEmpty else {
             print("[SOOPAPI] login: no credentials in .env")
+            markCredentialsUnusable()
             completion(false, "No SOOP_ID / SOOP_PASSWORD in .env")
             return
         }
@@ -243,13 +282,12 @@ final class SOOPAPIClient {
                 print("[SOOPAPI] login OK — \(cookies.count) cookies stored")
                 // 로그인 세션을 스트리밍 도메인(.sooplive.com)으로 복제
                 Self.mirrorAuthCookiesToStreamingDomain()
-                DispatchQueue.main.async {
-                    NotificationCenter.default.post(name: .soopLoginSucceeded, object: nil)
-                }
                 completion(true, nil)
             } else {
                 let msg = "RESULT=\(result) (\(json))"
                 print("[SOOPAPI] login FAILED: \(msg)")
+                // 서버가 자격증명을 거부했다. (네트워크/디코딩 오류는 일시적일 수 있어 기록하지 않는다)
+                self.markCredentialsUnusable()
                 completion(false, msg)
             }
         }.resume()
@@ -504,6 +542,8 @@ final class SOOPAPIClient {
     /// 카테고리 페이지에서 스크래핑한 BJID 풀로 호출.
     func fetchLiveListForBJIDs(_ bjids: [String],
                               completion: @escaping (Result<[LiveBroadcast], SOOPAPIError>) -> Void) {
+        // type=live를 보내므로 보내기 직전 미러링(늦은 응답이 .com 티켓을 지웠으면 19+ BJ가 빠진다).
+        Self.mirrorAuthCookiesToStreamingDomain()
         let group = DispatchGroup()
         var results: [LiveBroadcast] = []
         let lock = NSLock()
@@ -650,7 +690,9 @@ final class SOOPAPIClient {
         }
     }
 
+    /// - parameter reloginAttempted: -6/-8로 세션을 갱신해 다시 보낸 호출이면 true(재시도 1회, 또 막히면 `.adultVerificationRequired`).
     private func _fetchStreamInfo(bjId: String, broadNo: String, password: String?,
+                                 reloginAttempted: Bool = false,
                                  completion: @escaping (Result<StreamInfo, SOOPAPIError>) -> Void) {
         guard let url = URL(string: "https://live.sooplive.com/afreeca/player_live_api.php?bjid=\(bjId)") else {
             completion(.failure(.invalidURL))
@@ -688,13 +730,27 @@ final class SOOPAPIClient {
 
             let result = (channel["RESULT"] as? Int) ?? Int(channel["RESULT"] as? String ?? "0") ?? 0
             let bstatus = channel["BSTATUS"] as? String ?? ""
-            // RESULT=-6은 SOOP의 19+ 인증 미통과 신호 (AbroadChk=FAIL 쿠키 상태).
-            // 19+ 방송 시청은 SOOP 계정의 휴대폰 본인인증 + 성인 콘텐츠 보기 활성화가 필요하며
-            // 클라이언트(앱) 측 우회는 불가능하다. 별도 에러로 분리해서 UI에서 구체 메시지를 띄운다.
-            if result == -6 {
-                let abroadChk = HTTPCookieStorage.shared.cookies?
-                    .first(where: { $0.name == "AbroadChk" })?.value ?? "(none)"
-                print("[SOOPAPI] _fetchStreamInfo: RESULT=-6 (adult verification needed). AbroadChk=\(abroadChk)")
+            // -6(19+)/-8(19+ 비번방)은 세션 없음·만료에서 나온다. 로그인해 한 번만 다시 보내고, 그래도 막히면 계정 문제로 본다.
+            let adultGate = (result == -6 || result == -8)
+            if adultGate, !reloginAttempted {
+                print("[SOOPAPI] _fetchStreamInfo: RESULT=\(result) → refresh session and retry once")
+                self.login { ok, err in
+                    // 로그인 실패면 재요청해도 같다. 거부면 설정 문제, 아니면(네트워크 등) 일시적이다.
+                    guard ok else {
+                        let rejected = self.credentialsUnusableLocked
+                        print("[SOOPAPI] re-login failed (\(err ?? "-")) → \(rejected ? "loginRequired" : "transient")")
+                        completion(.failure(rejected ? .loginRequired
+                                                     : .streamUnavailable("로그인 서버에 연결하지 못했습니다. 다시 시도하세요")))
+                        return
+                    }
+                    Self.mirrorAuthCookiesToStreamingDomain()   // 보내기 직전 미러링(늦은 응답이 .com 티켓을 지웠을 수 있다)
+                    self._fetchStreamInfo(bjId: bjId, broadNo: broadNo, password: password,
+                                          reloginAttempted: true, completion: completion)
+                }
+                return
+            }
+            if adultGate {
+                print("[SOOPAPI] _fetchStreamInfo: RESULT=\(result) again after re-login → adultVerificationRequired")
                 completion(.failure(.adultVerificationRequired))
                 return
             }
@@ -724,6 +780,7 @@ final class SOOPAPIClient {
             // Chrome video element는 TS URL로 1080p~1440p를 받음. AVPlayer는 native HLS이라
             // 미디어 스택 레벨에서 동일 처리될 가능성. 401 받으면 PlayerViewController가
             // timeShiftURL(여기선 view_url+aid)로 자동 fallback.
+            Self.mirrorAuthCookiesToStreamingDomain()   // type=aid도 보내기 직전 미러링(같은 이유)
             self.fetchAID(bjId: bjId, broadNo: actualBNO, password: password) { aidResult in
                 let aid = (try? aidResult.get()) ?? initialAid
                 if let aid = aid, !aid.isEmpty {
@@ -904,10 +961,12 @@ final class SOOPAPIClient {
             Self.writeSelfTestResult("FAIL reason=no_bjid set_SOOP_TEST_BJID_env")
             return
         }
+        // 비번방 검증용. SOOP_TEST_PWD를 지정하지 않으면 nil이라 기존과 같다.
+        let pwd = ProcessInfo.processInfo.environment["SOOP_TEST_PWD"]
         Self.writeSelfTestResult("RUNNING bjId=\(bjId)")
         login { ok, err in
             print("SELFTEST: login ok=\(ok) err=\(err ?? "-")")
-            self.fetchStreamInfo(bjId: bjId, broadNo: "0") { result in
+            self.fetchStreamInfo(bjId: bjId, broadNo: "0", password: pwd) { result in
                 let abroad = HTTPCookieStorage.shared.cookies?
                     .first(where: { $0.name == "AbroadChk" })?.value ?? "(none)"
                 switch result {
