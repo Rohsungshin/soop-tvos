@@ -43,7 +43,8 @@ final class HomeViewController: UIViewController {
                                                name: .soopLoginSucceeded, object: nil)
     }
 
-    @objc private func onLoginSucceeded() { loadFavorites() }
+    // 최근 시청도 다시 — 로그인 전 폴링은 만료 세션일 수 있어 19+ BJ가 빠진다.
+    @objc private func onLoginSucceeded() { loadFavorites(); loadRecent() }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses where press.type == .playPause {

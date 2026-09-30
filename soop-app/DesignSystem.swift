@@ -369,6 +369,8 @@ extension UIViewController {
         switch err {
         case .adultVerificationRequired:
             message = "성인 인증이 필요한 방송입니다\nSOOP 웹에서 본인인증 + 성인 콘텐츠 보기 설정 후 다시 시도하세요"
+        case .loginRequired:
+            message = "19세 이상 방송을 열 수 없습니다 (로그인 세션 갱신 실패)\n.env의 SOOP_ID / SOOP_PASSWORD · SOOP_COOKIES와 계정의 성인 인증을 확인하세요"
         case .notLive:
             message = "방송이 종료되었거나 지금 라이브가 아닙니다"
         case .streamUnavailable(let why):
