@@ -64,7 +64,7 @@ All SOOP network calls go through this class. Key APIs:
 - **`LiveCategoriesViewController`** — Grid of categories (320×240 cards, 5 columns). Play/Pause remote button refreshes. Selects → pushes `LiveListViewController`.
 - **`LiveListViewController`** — Grid of live broadcasts for a chosen category (380×290 cards, 4 columns). Selects → calls `fetchStreamInfo` → presents `PlayerViewController` full-screen.
 - **`MyViewController`** — Grid of favorited BJs. Live ones show LIVE badge; offline ones show alert instead of playing.
-- **`PlayerViewController`** — Wraps `AVPlayerViewController`. On `.failed` status, automatically tries fallback URL (`timeShiftURL`). Injects SOOP cookies and `Referer`/`Origin` headers via `AVURLAssetHTTPHeaderFieldsKey`.
+- **`PlayerViewController`** — Wraps `AVPlayerViewController`. On `.failed` status, automatically tries fallback URL (`timeShiftURL`). Injects SOOP cookies and `Referer`/`Origin` headers via `AVURLAssetHTTPHeaderFieldsKey`. Transport bar = 3 volume actions + a `화질` (quality) `UIMenu` built from the playing master's `load(.variants)` (short-side buckets, only what the server offers); lowering applies an in-place `preferredMaximumResolution` cap, raising reloads the same URL as a new item (AVPlayer never up-switches on SOOP masters). The choice persists in UserDefaults `soop.player.quality`. Menu exits via `playerViewControllerShouldDismiss` (the AVKit controller is embedded as a child). Details: `docs/20260930-quality-selection-v1.md`.
 
 ### `CategoryDirectory`
 Hardcoded BJID pools per category, scraped from SOOP's category pages (which use client-side rendering and can't be fetched natively). Used as input to `fetchLiveListForBJIDs()` for the older polling approach. The newer `fetchBroadcasts(byCategory:)` via `sch.sooplive.com` API doesn't need this.
@@ -73,7 +73,7 @@ Hardcoded BJID pools per category, scraped from SOOP's category pages (which use
 
 - **No WKWebView on tvOS** — all content is fetched via `URLSession` and rendered natively.
 - **Cookie-based auth** — login stores cookies in `HTTPCookieStorage.shared`; all subsequent API calls reuse them automatically. `SOOP_COOKIES` in `.env` allows manual cookie injection for non-password auth flows.
-- **Stream URL strategy** — SOOP restricts 1080p to subscribers. Non-subscribers get master HLS with HD(540p)+SD(360p) variants. TS URLs carry embedded auth tokens; `view_url+aid` is the fallback. `PlayerViewController` handles automatic fallback on play failure.
+- **Stream URL strategy** — The master's variant set is decided per session by SOOP (via the AID): sessions judged domestic get only `hd` 960x540 + `sd` 640x360 whether logged in or not (SOOP's own web player also needs its local agent for more), while sessions judged overseas have received 1080p. `VIEWPRESET` advertises qualities that are not playable, so never build a quality list from it. `CHANNEL.TS` is the subscriber time-machine URL (401/403 for non-subscribers), so TS-primary broadcasts fall back to `view_url+aid`. `PlayerViewController` handles automatic fallback on play failure. Do not manipulate geo/CDN/cookies to unlock qualities (measured 2026-10-01, `docs/20260930-quality-selection-v1.md` §1).
 - **project.yml excludes** — several files (`ViewController.swift`, `iOSViewController.swift`, `OverlayView.swift`, `TVBrowserViewController.swift`, `LoginManager.swift`, `CategoryDirectory.swift`, `main.swift`) are excluded from the build target. They are kept as reference/legacy code.
 # CLAUDE.md
 
