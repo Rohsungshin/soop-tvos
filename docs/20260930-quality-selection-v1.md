@@ -22,7 +22,7 @@
 | 검증 | 규칙 하니스 ALL PASS(변이 검사 포함), 빌드 경고 0, 무음 합성 스트림 시나리오 12개, 리모컨 UI 테스트 12개(판정 11), 실제 SOOP 3회, 적대적 리뷰 확정 7건 전부 반영(§5) |
 | 검증 중 고친 기존 결함 | 화질 팝업을 Menu로 닫으면 영상이 멈추고, 바를 닫으려던 Menu가 방송을 꺼 버리던 문제(음량 버튼 때부터 있던 구조). tvOS 표준대로 한 단계씩 물러나게 고쳤다(§4-3) |
 | 보안 검토 | HIGH/MEDIUM 취약점 없음. 공개 저장소에 올라갈 이전 문서의 계정 나이 값을 푸시 전에 가렸다(§6) |
-| 설치 · 푸시 · 머지 | §7 |
+| 설치 · 푸시 · 머지 | 푸시·`main` 머지 완료(`c9c60dd`). 실기기 설치는 SOOP 앱이 실행 중이라 보류(§7-4) |
 | 사람이 확인할 것 | §8 T1~T17. 특히 T2(기기에 1080p·720p가 나오는지), T5(팝업에서 Menu), T10(배지 2줄째 가독성) |
 | 기본값으로 정해 둔 것 | 수동 = "최대 N"(상한), 자동 = 1080p 등급, 선택 전역 기억, 저장 화질이 없는 방송은 그 이하 최고(§2-6·§3-7). 바꾸고 싶으면 알려 달라 |
 
@@ -660,7 +660,23 @@ tvOS 17 타깃 typecheck도 진단 0건이었다.
 
 ### 7-4. 결과
 
-_(머지 뒤 기록)_
+| 단계 | 결과 |
+|------|------|
+| 기능 브랜치 푸시 | `origin/feature/quality-selection` = `8d67685`(이전 사이클 `ef4eb56` + 화질 선택 `8d67685`) |
+| `main` 머지·푸시 | `--no-ff` 머지 커밋 `c9c60dd` → `origin/main` = `c9c60dd`. 머지 트리는 검증한 `8d67685`와 같다(diff 0) |
+| 실기기 설치 | **보류.** 06:17·06:26 두 번 모두 SOOP 앱이 실행 중(같은 프로세스)이고 화면이 켜져 있었다. 누가 보고 있는지 원격으로 구분할 수 없어 덮어쓰지 않았다. 이후 5분마다 확인해 앱이 꺼지거나 Apple TV가 잠들면 설치만 하도록 걸어 두었다(결과는 아래 줄에 덧붙인다) |
+
+**스크래치 정리(06:30)**: 분석·기획·디자인·리뷰·검증 스크래치(`/tmp/soop-quality-*`, `/tmp/soop-plan-*`, `/tmp/soop-design-*`,
+`/tmp/rv-*` 등, 익명 단기 토큰이 든 원본 로그 포함), 리뷰어 프로브가 남긴 `~/Library/HTTPStorages/probe`, 임시 시뮬레이터 `SQH-4k`를 지웠다.
+남긴 것은 빌드 폴더 두 개(`/tmp/soop-build-device`·`-sim`, 기존 관례), 설치 감시(`/tmp/soop-install-watch`), 그리고 데이터 없이 복사해 둔
+검증 하니스 도구(`/tmp/soop-quality-harness-tools`: 무음 사다리·하니스 앱·UI 테스트·규칙 하니스 — 다음 사이클 재사용용, 재부팅 시 사라짐)다.
+
+직접 설치하려면(앱을 끈 뒤):
+
+```
+xcodebuild -project soop-app.xcodeproj -scheme soop-app -destination id=ED4F9D49-0D1F-5E57-8342-859E42F8590B -configuration Debug -derivedDataPath /tmp/soop-build-device -allowProvisioningUpdates build
+xcrun devicectl device install app --device ED4F9D49-0D1F-5E57-8342-859E42F8590B /tmp/soop-build-device/Build/Products/Debug-appletvos/soop-app.app
+```
 
 ---
 
