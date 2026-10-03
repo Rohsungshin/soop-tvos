@@ -36,6 +36,9 @@ SOOP_ID=your_id
 SOOP_PASSWORD=your_password
 # Optional: manually inject session cookies to bypass OAuth flows
 SOOP_COOKIES=_au=xxx; AuthTicket=yyy; UserTicket=zzz
+# Optional: PC login server (../soop-login-svr) — enables "로그인 요청" in the MY tab
+LOGIN_SERVER_URL=http://<mac-lan-ip>:8474
+LOGIN_SERVER_TOKEN=<same as server AUTH_TOKEN>
 ```
 
 The `scripts/copy-env.sh` pre-build script copies `.env` into the app bundle. `SOOPAPIClient` reads it at runtime via `Bundle.main.path(forResource: ".env", ofType: nil)`.
@@ -59,6 +62,12 @@ All SOOP network calls go through this class. Key APIs:
   4. Fetches `view_url` from `livestream-manager.sooplive.com/broad_stream_assign.html`.
   5. Returns `StreamInfo` with primary URL (TS with embedded token) and fallback URL (`view_url+?aid=`).
 - `sanitizeJSONBytes(_:)` — strips control characters (0x00–0x1F except \n \r \t) from SOOP responses before JSON parsing. **Always use this before parsing SOOP API responses.**
+
+### Server Login (`../soop-login-svr`)
+- **`LoginServerClient`** — REST + polling client for the PC login server (same protocol as chzzk-app's naver-login-svr). Enabled only when `LOGIN_SERVER_URL` and `LOGIN_SERVER_TOKEN` are both set.
+- **`ServerLoginViewController`** — requesting / waiting / failed screens. On `completed`, calls `SOOPAPIClient.applyServerCookies`.
+- **`SOOPAPIClient.applyServerCookies`** — injects the cookies on both domains, verifies via `afevent2.sooplive.co.kr/api/get_private_info.php` (`CHANNEL.IS_LOGIN == 1`), rolls back on failure, saves to Keychain on success and posts `.soopLoginSucceeded`. A saved server session is re-injected at launch and takes precedence over the `.env` ID/PW login (`login()` re-injects it instead of POSTing).
+- **`MyViewController`** — header button "로그인 요청" / "계정 변경".
 
 ### UI Layer
 - **`LiveCategoriesViewController`** — Grid of categories (320×240 cards, 5 columns). Play/Pause remote button refreshes. Selects → pushes `LiveListViewController`.
