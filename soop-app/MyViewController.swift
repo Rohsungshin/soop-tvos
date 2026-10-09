@@ -28,6 +28,8 @@ final class MyViewController: UIViewController {
     private var errorStateView: ErrorStateView?
     private var statusLabel: UILabel!
     private var loadingOverlay: LoadingOverlayView?
+    /// 로그인 서버(soop-login-svr) 로그인 버튼 — .env 에 LOGIN_SERVER_URL/TOKEN 이 있을 때만 표시
+    private let loginBtn = ServerLoginButton(title: "로그인 요청", isPrimary: false)
     /// 트리거가 5개(최초 로드/로그인 알림/Play-Pause/빈 상태 새로고침/오류 재시도)라 요청이 겹치기 쉽다.
     /// 오래된 응답 — 특히 로그인 전에 나간 미인증 응답 — 이 최신 목록을 덮어쓰지 않도록.
     private var loadEpoch = RequestEpoch()
@@ -42,7 +44,32 @@ final class MyViewController: UIViewController {
                                                name: .soopLoginSucceeded, object: nil)
     }
 
-    @objc private func onLoginSucceeded() { loadFavorites() }
+    @objc private func onLoginSucceeded() {
+        updateLoginButton()
+        loadFavorites()
+    }
+
+    private var hasAuthCookie: Bool {
+        HTTPCookieStorage.shared.cookies?.contains { $0.name == "AuthTicket" } ?? false
+    }
+
+    private func updateLoginButton() {
+        loginBtn.isHidden = !LoginServerClient.shared.isConfigured
+        loginBtn.setTitle(hasAuthCookie ? "계정 변경" : "로그인 요청")
+    }
+
+    @objc private func loginTapped() { presentServerLogin() }
+
+    /// PC 의 로그인 서버에 브라우저 로그인 창을 요청한다. 성공하면 soopLoginSucceeded 로 목록이 갱신된다.
+    private func presentServerLogin() {
+        let vc = ServerLoginViewController()
+        vc.modalPresentationStyle = .fullScreen
+        vc.onLoginSuccess = { [weak self] nickname in
+            guard let self = self else { return }
+            ToastView.show(in: self.view, message: nickname.map { "\($0)님으로 로그인됐어요" } ?? "로그인됐어요")
+        }
+        present(vc, animated: true)
+    }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses where press.type == .playPause {
@@ -56,6 +83,11 @@ final class MyViewController: UIViewController {
     private func setupUI() {
         headerView = SectionHeaderView(title: "MY", subtitle: "즐겨찾기 BJ")
         view.addSubview(headerView)
+
+        loginBtn.translatesAutoresizingMaskIntoConstraints = false
+        loginBtn.addTarget(self, action: #selector(loginTapped), for: .primaryActionTriggered)
+        view.addSubview(loginBtn)
+        updateLoginButton()
 
         statusLabel = UILabel()
         statusLabel.text = "즐겨찾기 불러오는 중..."
@@ -90,7 +122,10 @@ final class MyViewController: UIViewController {
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DS.Layout.headerTopOffset),
             headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Layout.contentSideMargin),
-            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DS.Layout.contentSideMargin),
+            headerView.trailingAnchor.constraint(equalTo: loginBtn.leadingAnchor, constant: -DS.Spacing.md),
+
+            loginBtn.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            loginBtn.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DS.Layout.contentSideMargin),
 
             statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
@@ -230,9 +265,8 @@ final class MyViewController: UIViewController {
         hideErrorState()
         // SOOPAPIError에 인증 전용 케이스가 없어, 로그인 쿠키(AuthTicket) 유무로
         // 인증 오류와 네트워크/서버 오류를 구분한다
-        let isLoggedIn = HTTPCookieStorage.shared.cookies?.contains { $0.name == "AuthTicket" } ?? false
         let errorView: ErrorStateView
-        if isLoggedIn {
+        if hasAuthCookie {
             errorView = ErrorStateView(
                 icon: "wifi.exclamationmark",
                 title: "즐겨찾기를 불러오지 못했습니다",
@@ -242,7 +276,9 @@ final class MyViewController: UIViewController {
             errorView = ErrorStateView(
                 icon: "person.crop.circle.badge.exclamationmark",
                 title: "로그인 정보를 확인할 수 없습니다",
-                subtitle: "SOOP 계정으로 로그인되어 있는지 확인해 주세요"
+                subtitle: LoginServerClient.shared.isConfigured
+                    ? "위의 '로그인 요청' 버튼으로 PC에서 로그인해 주세요"
+                    : "SOOP 계정으로 로그인되어 있는지 확인해 주세요"
             )
         }
         errorView.onRetry = { [weak self] in self?.loadFavorites() }

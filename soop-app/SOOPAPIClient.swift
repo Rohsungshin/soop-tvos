@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // MARK: - SOOP 네이티브 API 클라이언트
 //
@@ -100,6 +101,10 @@ final class SOOPAPIClient {
         // .env에 SOOP_COOKIES=name1=val1; name2=val2 형식으로 저장된 쿠키를 부팅 시 주입.
         // 네이버 OAuth 등 복잡한 로그인 흐름을 우회하기 위한 수동 세션 주입.
         Self.injectCookiesFromEnv()
+        // 로그인 서버(soop-login-svr)로 받은 세션이 있으면 .env 값보다 우선한다.
+        if let saved = Self.loadServerSession() {
+            Self.injectCookieString(saved, source: "server session (keychain)")
+        }
     }
 
     /// .env에서 SOOP_COOKIES 값을 읽어 HTTPCookieStorage.shared 에 주입.
@@ -122,6 +127,13 @@ final class SOOPAPIClient {
             print("[SOOPAPI] SOOP_COOKIES not in .env")
             return
         }
+        injectCookieString(cookieString, source: ".env")
+    }
+
+    /// `name1=val1; name2=val2` 형식의 쿠키 문자열을 HTTPCookieStorage.shared 에 주입. 주입한 쿠키 수를 반환.
+    /// (.env 의 SOOP_COOKIES / 로그인 서버가 보낸 쿠키 공용)
+    @discardableResult
+    static func injectCookieString(_ cookieString: String, source: String) -> Int {
         var injected = 0
         for pair in cookieString.split(separator: ";") {
             let parts = pair.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -149,7 +161,8 @@ final class SOOPAPIClient {
                 }
             }
         }
-        print("[SOOPAPI] injected \(injected) cookies from .env")
+        print("[SOOPAPI] injected \(injected) cookies from \(source)")
+        return injected
     }
 
     /// 로그인 세션 쿠키를 스트리밍 도메인(.sooplive.com)에 복제.
@@ -215,7 +228,7 @@ final class SOOPAPIClient {
     /// .env에서 ID/PW 읽어 로그인 시도. 결과는 콜백.
     /// - completion: success=true이면 로그인 성공, 쿠키가 세션에 저장됨.
     func login(completion: @escaping (Bool, String?) -> Void) {
-        if credentialsUnusableLocked {
+        if credentialsUnusableLocked && !hasServerSession {
             completion(false, "credentials rejected earlier in this run")
             return
         }
@@ -235,6 +248,13 @@ final class SOOPAPIClient {
     }
 
     private func performLogin(completion: @escaping (Bool, String?) -> Void) {
+        // 로그인 서버로 받은 세션이 있으면 .env ID/PW 로 POST 하지 않고 그 세션을 다시 심는다.
+        // (.env 계정이 서버로 로그인한 계정을 덮어쓰지 않도록)
+        if let saved = Self.loadServerSession() {
+            Self.injectCookieString(saved, source: "server session (keychain)")
+            completion(true, nil)
+            return
+        }
         guard let creds = Self.loadCredentialsFromEnv(),
               !creds.id.isEmpty, !creds.pw.isEmpty else {
             print("[SOOPAPI] login: no credentials in .env")
@@ -307,6 +327,92 @@ final class SOOPAPIClient {
             if t.hasPrefix("SOOP_PASSWORD=") { pw = String(t.dropFirst("SOOP_PASSWORD=".count)).trimmingCharacters(in: .whitespaces) }
         }
         return Creds(id: id, pw: pw)
+    }
+
+    // MARK: - 서버 로그인 (soop-login-svr) 쿠키 적용
+    //
+    // 로그인 서버가 PC 브라우저 로그인으로 캡처한 쿠키("AuthTicket=..; UserTicket=..; ...")를 주입하고
+    // get_private_info 로 로그인 여부를 검증한다. 통과하면 Keychain 에 저장해 다음 실행에도 쓴다.
+
+    private static let keychainService = "com.ssroh.soop-app"
+    private static let serverSessionAccount = "soop.server.cookies"
+
+    /// 로그인 서버로 받은 세션이 저장돼 있는지.
+    var hasServerSession: Bool { Self.loadServerSession() != nil }
+
+    /// 서버 쿠키를 주입·검증한다. completion(성공 여부, 닉네임).
+    /// 검증 실패 시 주입 전 쿠키 상태로 되돌린다 — 실패한 시도가 기존 세션을 망가뜨리지 않도록.
+    func applyServerCookies(_ cookieString: String, completion: @escaping (Bool, String?) -> Void) {
+        let store = HTTPCookieStorage.shared
+        let snapshot = store.cookies?.filter { $0.domain.contains("sooplive") } ?? []
+        guard Self.injectCookieString(cookieString, source: "login server") > 0 else {
+            completion(false, nil)
+            return
+        }
+        verifyLogin { loggedIn, nickname in
+            guard loggedIn else {
+                print("[SOOPAPI] applyServerCookies: 검증 실패 — 쿠키 롤백")
+                for c in store.cookies ?? [] where c.domain.contains("sooplive") { store.deleteCookie(c) }
+                snapshot.forEach { store.setCookie($0) }
+                completion(false, nil)
+                return
+            }
+            Self.saveServerSession(cookieString)
+            self.loginLock.lock(); self.hasLoggedInOnce = true; self.loginLock.unlock()
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .soopLoginSucceeded, object: nil)
+            }
+            completion(true, nickname)
+        }
+    }
+
+    /// `afevent2.sooplive.co.kr/api/get_private_info.php` — CHANNEL.IS_LOGIN == 1 이면 로그인 상태(비로그인 -1).
+    private func verifyLogin(completion: @escaping (_ loggedIn: Bool, _ nickname: String?) -> Void) {
+        guard let url = URL(string: "https://afevent2.sooplive.co.kr/api/get_private_info.php") else {
+            completion(false, nil)
+            return
+        }
+        var req = URLRequest(url: url)
+        req.setValue("https://www.sooplive.co.kr/", forHTTPHeaderField: "Referer")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        session.dataTask(with: req) { data, _, _ in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: Self.sanitizeJSONBytes(data)) as? [String: Any],
+                  let channel = json["CHANNEL"] as? [String: Any] else {
+                completion(false, nil)
+                return
+            }
+            let isLogin = (channel["IS_LOGIN"] as? Int) ?? Int(channel["IS_LOGIN"] as? String ?? "") ?? -1
+            let nick = channel["LOGIN_NICK"] as? String
+            completion(isLogin == 1, (nick?.isEmpty == false) ? nick : nil)
+        }.resume()
+    }
+
+    private static func keychainQuery() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: keychainService,
+         kSecAttrAccount as String: serverSessionAccount]
+    }
+
+    private static func saveServerSession(_ cookieString: String) {
+        let query = keychainQuery()
+        SecItemDelete(query as CFDictionary)
+        var attrs = query
+        attrs[kSecValueData as String] = Data(cookieString.utf8)
+        attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        let status = SecItemAdd(attrs as CFDictionary, nil)
+        if status != errSecSuccess { print("[SOOPAPI] server session keychain save failed: \(status)") }
+    }
+
+    private static func loadServerSession() -> String? {
+        var query = keychainQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data,
+              let s = String(data: data, encoding: .utf8), !s.isEmpty else { return nil }
+        return s
     }
 
     // MARK: - 이미지 URL 규칙

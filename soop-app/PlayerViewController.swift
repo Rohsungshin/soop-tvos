@@ -93,14 +93,38 @@ final class PlayerViewController: UIViewController {
     /// 다시 시도로 AVPlayer를 새로 만들 때 음소거 상태를 이어 준다 (세션 범위, 저장하지 않음)
     private var pendingMuted = false
 
+    /// 플레이어 뷰를 한 번이라도 드러냈는지(프리롤을 내렸는지). startPlayback마다 false로 돌아간다.
+    /// 화질 고정은 프리롤 중에 item을 교체할 수 있는데, 그 경로(qualityReload)는 '재생 중 교체'를 전제로
+    /// 인트로(페이드인·프리롤 내리기·재생 시작)를 건너뛴다. 아직 드러나기 전이라면 건너뛰면 안 되므로
+    /// '재생 중인가'를 qualityReload가 아니라 이 플래그로 판단한다.
+    private var didRevealPlayer = false
+
+    /// 화질 고정 교체가 실패해 직전 URL로 되돌리는 중인지. 고정은 '한 번도 재생해 본 적 없는' media URL로 바꾸는 일이라
+    /// 실패할 수 있는데, 그때 폴백 예산(didFallback)을 써 버리면 멀쩡히 나오던 화면이 에러 카드로 끝난다.
+    /// 되돌리기까지 실패할 때만 기존 폴백·에러 경로로 간다.
+    private var isRevertingPin = false
+
+    /// D1: 재생 중 소스가 죽을 때(라이브 끊김) 오는 AVPlayerItemFailedToPlayToEndTime 알림 토큰.
+    /// status KVO는 시작 실패에서만 .failed를 주고 재생 중 사망은 못 잡는다
+    /// (docs/20261003-fixed-resolution-v1.md §1-6 D1). 이 알림으로 폴백/에러 카드를 띄운다.
+    private var failedToEndObserver: NSObjectProtocol?
+
     // v6: 화질 선택 — 0 = 자동, 그 외 = 짧은 변 등급(360/540/720/1080). 방송이 바뀌어도 유지한다(음량과 같은 방식).
-    private static let qualityDefaultsKey = "soop.player.quality"
+    // v8: 설정 탭과 같은 값을 보도록 저장소를 PlaybackSettings로 모았다(키는 `soop.player.quality` 그대로).
     private var qualityChoice: Int {
-        get { UserDefaults.standard.integer(forKey: Self.qualityDefaultsKey) }
-        set { UserDefaults.standard.set(newValue, forKey: Self.qualityDefaultsKey) }
+        get { PlaybackSettings.quality }
+        set { PlaybackSettings.quality = newValue }
     }
     /// 화질 메뉴 행 — 재생 중 master에 실제로 있는 등급(높은 것부터). 등급이 2개 미만이면 비어 있고 메뉴는 '자동'만.
     private var qualityOptions: [Int] = []
+    /// 화질 고정: master를 파싱해 얻은 등급→media playlist URL(높은 등급 우선). 수동 N을 고르면 이 URL을 직접 재생해
+    /// 렌디션을 하나로 고정한다(ABR 전환 불가 = 고정). docs/20261003-fixed-resolution-v1.md §2-3.
+    private var renditions: [(bucket: Int, url: URL)] = []
+    /// 이 방송의 master(= view_url+aid) URL. '자동'으로 돌아갈 때의 대상이자 renditions 파싱 대상이다.
+    /// TS(구독자 타임머신) 방송은 timeShiftURL이 공개 master라 그쪽을 쓴다.
+    private var masterURL: URL?
+    /// 지금 AVPlayer에 올라가 있는 URL. 같은 URL로 불필요하게 교체하지 않으려고 추적한다.
+    private var currentPlayURL: URL?
     /// 화질 메뉴 행 인스턴스(키 0 = 자동). 체크·부제는 이 인스턴스를 제자리에서 바꾼다.
     private var qualityActions: [Int: UIAction] = [:]
     /// 트랜스포트 바 음량 항목 — AVPlayerViewController마다 한 번 만들어 화질 메뉴를 바꿀 때도 같은 인스턴스를 쓴다.
@@ -397,24 +421,36 @@ final class PlayerViewController: UIViewController {
         }
     }
 
-    /// 고른 화질을 저장하고 적용한다. 내리기는 재생 중 item의 상한만 바꾼다(끊김 없음).
-    /// 올리기는 상한만 올려서는 AVPlayer가 한 번 내려간 SOOP variant로 다시 오르지 않아(선언 대역폭 과소 -12318,
-    /// docs/20260930-quality-selection-v1.md §2-7) 같은 URL로 item을 새로 만든다. 같은 행을 다시 골라도 이 규칙으로 복구된다.
+    /// 고른 화질을 저장하고 고정한다. 수동 N이면 그 등급 variant의 media playlist URL을 직접 재생해(단일 렌디션)
+    /// ABR 전환 자체를 막는다 = 진짜 고정. 자동이면 master로 돌려 ABR을 되살린다.
+    /// 상한(preferredMaximumResolution)으로 내리던 예전 방식은 망이 흔들리면 더 낮은 화질로 떠내려가 다시 오르지 않았다
+    /// (docs/20260930-quality-selection-v1.md §2-7). 고정은 그 문제가 없다.
     private func selectQuality(_ q: Int) {
         // 체크가 옮겨 갈 때만 저장한다 — 체크된 행을 다시 고르는 복구가 대체 중인 선호(예: 1080p)를 지우지 않게
         qualityChoice = QualityLadder.choice(afterPicking: q, saved: qualityChoice, options: qualityOptions)
-        guard let item = avVC?.player?.currentItem else { return }
-        // 제자리로 내린 직후에는 화면이 아직 이전 등급이다(1.6~3.8초). 걸린 상한과 비교해 낮은 쪽을 실제로 본다.
-        let actual = min(currentQualityBucket(), QualityLadder.ceiling(forCap: item.preferredMaximumResolution))
-        if actual > 0, QualityLadder.target(choice: q, options: qualityOptions) > actual,
-           let url = (item.asset as? AVURLAsset)?.url {
-            // 메뉴 핸들러 안에서 item을 바꾸다 포커스 갱신 중 크래시한 보고가 있어 다음 런루프로 미룬다.
-            // 체크·부제는 교체 직후, 배지는 새 item의 첫 프레임에서 맞춘다.
-            DispatchQueue.main.async { [weak self] in self?.swapPlayerURL(url, qualityReload: true) }
-            return
+        pinCurrentChoice(userInitiated: true)
+    }
+
+    /// 저장된 화질을 실제 재생에 적용한다. 수동 N → N 등급 media URL로 교체(고정), 자동 → master로 교체(ABR).
+    /// renditions가 없으면(파싱 실패·단일 화질 방송) 메뉴가 '자동'뿐이라 할 일이 없다.
+    private func pinCurrentChoice(userInitiated: Bool) {
+        func refreshLabel() { if userInitiated { updateQualityLabel(show: true) } }
+        guard !renditions.isEmpty, let master = masterURL, avVC?.player?.currentItem != nil else {
+            refreshLabel(); return
         }
-        applyQualityCap(to: item)
-        updateQualityLabel(show: true)
+        // '자동'은 저장값으로 판단한다. target(choice:options:)는 자동일 때 0이 아니라 '기대 등급'(= 가장 높은 행)을
+        // 돌려주는 배지용 규약이라, 그것으로 자동을 판정하면 master 분기가 영영 선택되지 않아
+        // '자동'을 골라도 단일 렌디션에 갇힌 채 ABR이 돌아오지 않는다.
+        let desired: URL?
+        if qualityChoice == 0 {
+            desired = master
+        } else {
+            let target = QualityLadder.target(choice: qualityChoice, options: qualityOptions)
+            desired = renditions.first(where: { $0.bucket == target })?.url
+        }
+        guard let url = desired, currentPlayURL != url else { refreshLabel(); return }
+        // 메뉴 핸들러 안에서 item을 바꾸다 포커스 갱신 중 크래시한 보고가 있어 다음 런루프로 미룬다(기존 규칙).
+        DispatchQueue.main.async { [weak self] in self?.swapPlayerURL(url, qualityReload: true) }
     }
 
     private func stepVolume(by delta: Float) {
@@ -551,6 +587,55 @@ final class PlayerViewController: UIViewController {
         }
     }
 
+    // MARK: - 재생 헤더 / 끊김 감지
+
+    /// AVPlayer에 넘길 공통 요청 헤더.
+    /// Referer·Origin·UA는 SOOP CDN이 요구하므로 항상 싣지만, 로그인 쿠키(AuthTicket/UserTicket 등)는
+    /// 요청 호스트가 SOOP 도메인일 때만 싣는다. 예전 코드는 호스트와 무관하게 쿠키를 실어,
+    /// SOOP이 아닌 호스트(루프백 등)로 가는 순간 로그인 세션이 샜다
+    /// (docs/20261003-fixed-resolution-v1.md §1-6 D2). SOOP 재생 URL은 모두 *.sooplive 서브도메인이라 회귀가 없다.
+    private static func playbackHeaders(for url: URL) -> [String: String] {
+        var headers: [String: String] = [
+            "Referer": "https://play.sooplive.com/",
+            "Origin": "https://play.sooplive.com",
+            "User-Agent": "AppleCoreMedia/1.0.0 (Apple TV; U; CPU OS 17_4 like Mac OS X)"
+        ]
+        if let host = url.host?.lowercased(),
+           host == "sooplive.com" || host.hasSuffix(".sooplive.com")
+             || host == "sooplive.co.kr" || host.hasSuffix(".sooplive.co.kr") {
+            let soopCookies = (HTTPCookieStorage.shared.cookies ?? []).filter { $0.domain.contains("sooplive") }
+            if !soopCookies.isEmpty {
+                headers["Cookie"] = soopCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+            }
+        }
+        return headers
+    }
+
+    /// D1: 지금 재생 중인 item에 '재생 중 실패' 알림 관찰을 건다. 이전 관찰은 먼저 해제한다.
+    private func observePlaybackFailure(for item: AVPlayerItem, info: StreamInfo) {
+        removePlaybackFailureObserver()
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] note in
+            guard let self = self, self.avVC != nil, !self.isBeingDismissed else { return }
+            // 교체로 밀려난 item의 뒤늦은 알림으로 재생 중인 화면을 건드리지 않는다
+            guard (note.object as AnyObject?) === self.avVC?.player?.currentItem else { return }
+            let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            print("[Player] playback failed mid-stream → fallback/error")
+            // 이미 에러 카드가 떠 있으면 중복 처리하지 않는다. 그 밖에는 기존 폴백 로직을 그대로 탄다
+            // (폴백 전이면 대체 URL, 폴백했으면 에러 카드).
+            guard self.errorContainer == nil else { return }
+            self.tryFallback(info: info, originalError: err)
+        }
+    }
+
+    private func removePlaybackFailureObserver() {
+        if let token = failedToEndObserver {
+            NotificationCenter.default.removeObserver(token)
+            failedToEndObserver = nil
+        }
+    }
+
     // MARK: - 재생 시작
 
     private func startPlayback() {
@@ -558,36 +643,23 @@ final class PlayerViewController: UIViewController {
             showError(title: "스트림 정보 없음", description: "재생할 정보가 비어 있습니다.")
             return
         }
-        print("[Player] URL: \(info.viewURL)")
+        // AVPlayer에 넘길 요청 헤더. 로그인 쿠키는 SOOP 도메인에만 싣는다(playbackHeaders, D2).
+        // 전체 URL에는 aid 토큰이 들어 있어 호스트만 찍는다(토큰 노출 방지).
+        let headers = Self.playbackHeaders(for: info.viewURL)
+        print("[Player] URL host: \(info.viewURL.host ?? "?") (cookies: \(headers["Cookie"] != nil ? "on" : "off"))")
 
-        // 공유 쿠키 저장소(URLSession에서 player_live_api로 받은 쿠키)를
-        // Cookie 헤더로 직접 합쳐 AVPlayer가 동일 세션으로 보이게 한다
-        var cookieHeader = ""
-        if let cookies = HTTPCookieStorage.shared.cookies(for: info.viewURL) {
-            cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        }
-        // sooplive.com 도메인 쿠키들도 함께 (CDN 도메인엔 직접 안 매칭될 수 있음)
-        let allCookies = HTTPCookieStorage.shared.cookies ?? []
-        let soopCookies = allCookies.filter { $0.domain.contains("sooplive") }
-        let extra = soopCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        if !extra.isEmpty {
-            cookieHeader = cookieHeader.isEmpty ? extra : "\(cookieHeader); \(extra)"
-        }
-        print("[Player] cookies: \(cookieHeader.prefix(120))...")
-
-        var headers: [String: String] = [
-            "Referer": "https://play.sooplive.com/",
-            "Origin": "https://play.sooplive.com",
-            "User-Agent": "AppleCoreMedia/1.0.0 (Apple TV; U; CPU OS 17_4 like Mac OS X)"
-        ]
-        if !cookieHeader.isEmpty {
-            headers["Cookie"] = cookieHeader
-        }
         let options: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": headers]
         let asset = AVURLAsset(url: info.viewURL, options: options)
         let item = AVPlayerItem(asset: asset)
-        applyQualityCap(to: item)   // 저장한 화질을 첫 variant 선택 전에 건다(플레이어에 붙이기 전)
+        didRevealPlayer = false     // 새 플레이어 뷰는 alpha 0 + 프리롤 위 — 아직 아무것도 드러나지 않았다
+        applyQualityCap(to: item)   // 자동일 때 1080p 초과(1440p·4K) variant를 배제한다. 고정 재생엔 영향 없음
         let player = AVPlayer(playerItem: item)
+        currentPlayURL = info.viewURL
+        // master(= 자동 대상, renditions 파싱 대상). TS 방송은 viewURL이 TS라 공개 master인 timeShiftURL을 쓴다.
+        // 다만 view_url이나 AID를 못 받으면 SOOPAPIClient가 양쪽에 같은 TS를 넣는다. TS는 master가 아니라
+        // media playlist이고 비구독자에겐 401/403이라 파싱 대상이 못 되므로, 그때는 master가 없는 것으로 둔다
+        // (폴백으로 진짜 master에 닿으면 swapPlayerURL에서 채운다).
+        masterURL = (info.timeShiftURL == info.viewURL) ? nil : (info.timeShiftURL ?? info.viewURL)
 
         let vc = AVPlayerViewController()
         vc.player = player
@@ -609,30 +681,23 @@ final class PlayerViewController: UIViewController {
         // 지난 재생에서 쓰던 인앱 음량 복원(+ 다시 시도 시 음소거 유지) + 트랜스포트 바 음량·화질 컨트롤 부착
         player.volume = Self.savedVolume()
         player.isMuted = pendingMuted
-        // 화질 메뉴는 '자동'만으로 먼저 붙이고, variant를 읽으면 목록을 채운다(보통 프리롤 중에 끝남)
+        // 화질 메뉴는 '자동'만으로 먼저 붙이고, master를 파싱하면 목록을 채운다(보통 프리롤 중에 끝남).
+        // 저장된 화질이 수동이면 파싱이 끝나는 대로 그 등급 media URL로 조용히 고정 전환한다(loadRenditions).
         qualityOptions = []
+        renditions = []
         volumeMenuItems = makeTransportBarItems()
         vc.transportBarCustomMenuItems = volumeMenuItems + [makeQualityMenu()]
-        loadQualityOptions(for: item)
+        if let master = masterURL { loadRenditions(from: master) }
 
         // 플레이어 상태 관찰 — 실패 시 fallback
         observer = item.observe(\.status, options: [.new]) { [weak self] it, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                // 화질 고정 교체로 item이 이미 바뀐 뒤 도착한 콜백은 버린다(swapPlayerURL의 가드와 같은 이유)
+                guard it === self.avVC?.player?.currentItem else { return }
                 switch it.status {
                 case .readyToPlay:
-                    UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 } completion: { _ in
-                        self.handOffFocusToPlayer()
-                    }
-                    self.hidePreRoll()
-                    player.play()
-                    print("[Player] readyToPlay → playing")
-                    self.startObservingResolution(item: it)
-                    self.showTopMetaTemporarily()
-                    // 복원된 인앱 음량이 100%가 아니거나 음소거면 이유 없이 조용하지 않도록 한 번 보여 준다
-                    if player.volume < 1 || player.isMuted {
-                        self.showVolumeHUD(source: .app)
-                    }
+                    self.revealPlayer(item: it)
                 case .failed:
                     let err = it.error
                     print("[Player] FAILED: \(String(describing: err))")
@@ -641,6 +706,26 @@ final class PlayerViewController: UIViewController {
                     break
                 }
             }
+        }
+        observePlaybackFailure(for: item, info: info)   // D1: 재생 중 끊김 감지
+    }
+
+    /// 첫 readyToPlay에서 한 번만 — 플레이어를 드러내고 프리롤을 내리고 재생을 시작한다.
+    /// 어떤 item에서 오든(원래 item·화질 고정 교체·폴백) 처음 준비된 것이 화면을 연다.
+    private func revealPlayer(item: AVPlayerItem) {
+        guard !didRevealPlayer, let player = avVC?.player else { return }
+        didRevealPlayer = true
+        UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 } completion: { _ in
+            self.handOffFocusToPlayer()
+        }
+        hidePreRoll()
+        player.play()
+        print("[Player] readyToPlay → playing")
+        startObservingResolution(item: item)
+        showTopMetaTemporarily()
+        // 복원된 인앱 음량이 100%가 아니거나 음소거면 이유 없이 조용하지 않도록 한 번 보여 준다
+        if player.volume < 1 || player.isMuted {
+            showVolumeHUD(source: .app)
         }
     }
 
@@ -690,32 +775,47 @@ final class PlayerViewController: UIViewController {
         print("[Player] quality \(qualityChoice == 0 ? "auto" : "\(qualityChoice)p") → cap \(Int(item.preferredMaximumResolution.width))")
     }
 
-    /// item의 master에 실제로 있는 variant로 화질 메뉴 목록을 만든다(서버가 넣어 준 것만).
-    /// item을 만든 직후 부르므로 보통 프리롤 중(바에 닿을 수 없을 때) 끝난다. 목록이 같으면 재할당하지 않는다.
-    private func loadQualityOptions(for item: AVPlayerItem) {
-        guard let asset = item.asset as? AVURLAsset else { return }
-        Task { @MainActor [weak self] in
-            let variants: [AVAssetVariant]
-            do {
-                variants = try await asset.load(.variants)
-            } catch {
-                // TS(구독자 타임머신)는 401/403으로 여기서 실패한다. 메뉴는 그대로 두고 스왑된 item에서 다시 읽는다.
-                print("[Player] variants: load failed (\((error as NSError).code)) — menu kept")
+    /// master playlist 본문을 직접 받아 파싱해 등급→media URL 지도(renditions)와 메뉴 목록을 만든다.
+    /// tvOS 17에는 AVAssetVariant.url이 없어 load(.variants) 대신 본문을 파싱한다(URL이 있어야 화질을 고정할 수 있다).
+    /// 방송당 한 번(startPlayback) 부른다. 목록이 바뀔 때만 메뉴를 재할당한다(포커스 초기화 방지).
+    private func loadRenditions(from master: URL) {
+        var req = URLRequest(url: master)
+        for (k, v) in Self.playbackHeaders(for: master) { req.setValue(v, forHTTPHeaderField: k) }
+        req.timeoutInterval = 10
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard let data = data, let text = String(data: data, encoding: .utf8), (200..<300).contains(status) else {
+                // TS·만료 토큰은 401/403 본문(playlist가 아님)을 준다. 메뉴는 '자동'인 채로 둔다.
+                print("[Player] renditions: fetch failed (http \(status), err \((err as NSError?)?.code ?? 0)) — menu kept")
                 return
             }
-            let sizes = variants.compactMap { $0.videoAttributes?.presentationSize }
+            // 상대 URI는 AVPlayer와 같게 '리다이렉트 후 최종 URL' 기준으로 풀어야 한다.
+            // 요청 URL로 풀면 CDN이 엣지로 302할 때 교체 URL이 전부 리다이렉트 전 호스트를 가리켜 404가 난다.
+            let base = (resp as? HTTPURLResponse)?.url ?? master
+            let parsed = QualityLadder.renditions(fromPlaylist: text, baseURL: base)
+            let sizes = parsed.map { $0.size }
             let options = QualityLadder.options(from: sizes)
-            let summary = "\(sizes.map { "\(Int($0.width))x\(Int($0.height))" }) → options \(options)"
-            guard let self, let avVC = self.avVC, avVC.player?.currentItem === item else {
-                print("[Player] variants: \(summary) (stale)")
-                return
+            // 등급이 겹치면(예: 854x480과 960x540이 모두 540 등급) 실제 해상도가 높은 쪽을 쓴다.
+            // master의 나열 순서는 대역폭 오름차순인 경우가 많아 '먼저 나온 것'은 오히려 낮은 쪽이다.
+            var map: [Int: (side: CGFloat, url: URL)] = [:]
+            for r in parsed {
+                let b = QualityLadder.bucket(for: r.size)
+                let side = min(r.size.width, r.size.height)
+                if map[b] == nil || side > map[b]!.side { map[b] = (side, r.url) }
             }
-            print("[Player] variants: \(summary)")
-            guard options != self.qualityOptions else { return }
-            self.qualityOptions = options
-            avVC.transportBarCustomMenuItems = self.volumeMenuItems + [self.makeQualityMenu()]
-            self.updateQualityLabel(show: false)
-        }
+            DispatchQueue.main.async {
+                guard let self = self, let avVC = self.avVC else { return }
+                self.renditions = options.compactMap { b in map[b].map { (b, $0.url) } }
+                print("[Player] renditions: \(options) (parsed \(parsed.count))")
+                if options != self.qualityOptions {
+                    self.qualityOptions = options
+                    avVC.transportBarCustomMenuItems = self.volumeMenuItems + [self.makeQualityMenu()]
+                }
+                self.updateQualityLabel(show: false)
+                // 저장된 화질이 수동이면 그 등급 media URL로 고정 전환한다(프리롤 중에 조용히).
+                if self.qualityChoice != 0 { self.pinCurrentChoice(userInitiated: false) }
+            }
+        }.resume()
     }
 
     /// primary viewURL(TS) 실패 시 timeShiftURL(view_url+aid)로 즉시 swap.
@@ -772,20 +872,8 @@ final class PlayerViewController: UIViewController {
     /// - parameter qualityReload: 화질을 올리려고 같은 URL로 item만 새로 만드는 경우. 재생 중 교체라 프리롤 숨기기·페이드인·
     ///   상단 메타·음량 HUD·포커스 넘기기를 하지 않고, 일시정지 중이었으면 그대로 둔다. 실패하면 아직 폴백 전이면 폴백, 아니면 에러 카드.
     private func swapPlayerURL(_ url: URL, qualityReload: Bool = false) {
-        // sooplive 쿠키 + Referer/Origin 헤더
-        var cookieHeader = ""
-        let allCookies = HTTPCookieStorage.shared.cookies ?? []
-        let soopCookies = allCookies.filter { $0.domain.contains("sooplive") }
-        cookieHeader = soopCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-
-        var headers: [String: String] = [
-            "Referer": "https://play.sooplive.com/",
-            "Origin": "https://play.sooplive.com",
-            "User-Agent": "AppleCoreMedia/1.0.0 (Apple TV; U; CPU OS 17_4 like Mac OS X)"
-        ]
-        if !cookieHeader.isEmpty {
-            headers["Cookie"] = cookieHeader
-        }
+        // 로그인 쿠키는 SOOP 도메인에만 싣는다(playbackHeaders, D2).
+        let headers = Self.playbackHeaders(for: url)
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
         applyQualityCap(to: item)
@@ -798,37 +886,55 @@ final class PlayerViewController: UIViewController {
         hideResolutionTimer?.invalidate()
         resolutionLabel.alpha = 0
 
-        let keepPaused = qualityReload && avVC.player?.timeControlStatus == .paused
+        // 사용자가 일시정지해 둔 상태를 화질 교체가 깨지 않게 하는 장치다. 아직 드러나기 전(프리롤 중)에는
+        // 재생을 시작한 적이 없어 항상 .paused라, didRevealPlayer를 함께 보지 않으면 교체된 item이 영영 재생되지 않는다.
+        let previousURL = currentPlayURL   // 고정 교체가 실패하면 여기로 되돌린다
+        let keepPaused = qualityReload && didRevealPlayer && avVC.player?.timeControlStatus == .paused
         avVC.player?.replaceCurrentItem(with: item)
+        currentPlayURL = url
         if !keepPaused { avVC.player?.play() }
         syncQualityMenu()   // 실제를 모르는 동안은 체크 행의 '현재 X' 부제를 비운다
-        loadQualityOptions(for: item)
+        // renditions는 startPlayback에서 한 번 파싱한다. 다만 그때(TS 등으로) 비어 있었고 지금 폴백으로 master에 닿았으면
+        // 이 URL이 진짜 master이므로 '자동'의 대상도 여기로 옮기고 다시 파싱한다(masterURL이 죽은 TS로 남지 않게).
+        if renditions.isEmpty, !qualityReload {
+            masterURL = url
+            loadRenditions(from: url)
+        }
 
         if qualityReload {
             startObservingResolution(item: item)   // 첫 프레임이 readyToPlay보다 먼저 올 수 있다
             print("[Player] quality reload — same URL, new item")
         } else {
-            print("[Player] swapPlayerURL → fallback URL: \(url.absoluteString.prefix(140))")
+            print("[Player] swapPlayerURL → fallback host: \(url.host ?? "?")")   // 토큰이 든 전체 URL은 찍지 않는다
         }
 
         // fallback 아이템에도 상태·해상도 KVO 부착
         observer = item.observe(\.status, options: [.new]) { [weak self] it, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                // 이미 다른 item으로 교체된 뒤 뒤늦게 도착한 콜백은 버린다. invalidate()는 메인 큐에
+                // 이미 올라간 블록을 취소하지 못해, 화질 고정 교체와 직전 item의 실패가 겹치면
+                // 재생 중인 화면 위에 에러 카드가 뜨거나 방금 고정한 item이 폐기된다.
+                guard it === self.avVC?.player?.currentItem else { return }
                 switch it.status {
                 case .readyToPlay:
-                    guard !qualityReload else { return }
-                    UIView.animate(withDuration: 0.3) { self.avVC.view.alpha = 1 } completion: { _ in
-                        self.handOffFocusToPlayer()
-                    }
-                    self.hidePreRoll()
-                    self.startObservingResolution(item: it)
-                    self.showTopMetaTemporarily()
-                    if let player = self.avVC?.player, player.volume < 1 || player.isMuted {
-                        self.showVolumeHUD(source: .app)
+                    self.isRevertingPin = false
+                    if !self.didRevealPlayer {
+                        // 프리롤 중에 교체된 경우(화질 고정 또는 조기 폴백) — 이 item이 화면을 연다
+                        self.revealPlayer(item: it)
+                    } else if !qualityReload {
+                        // 이미 재생 중이던 화면을 폴백으로 바꾼 경우 — 인트로는 다시 하지 않고 해상도 관찰만 새 item에 건다
+                        self.startObservingResolution(item: it)
                     }
                 case .failed:
                     print("[Player] \(qualityReload ? "Quality reload" : "Fallback") FAILED: \(String(describing: it.error))")
+                    // 화질 고정 교체 실패 — 직전까지 재생되던 URL로 되돌린다. 폴백 예산을 쓰지 않는다.
+                    if qualityReload, !self.isRevertingPin, let back = previousURL, back != url {
+                        print("[Player] quality pin failed → reverting to previous URL")
+                        self.isRevertingPin = true
+                        self.swapPlayerURL(back, qualityReload: true)
+                        return
+                    }
                     // primary를 같은 URL로 바꾼 것뿐이면 primary 실패와 같이 한 번 폴백한다(기존 자동 복구 유지)
                     if qualityReload, !self.didFallback, let info = self.streamInfo {
                         self.tryFallback(info: info, originalError: it.error)
@@ -843,6 +949,7 @@ final class PlayerViewController: UIViewController {
                 }
             }
         }
+        if let info = streamInfo { observePlaybackFailure(for: item, info: info) }   // D1: 새 item에도 끊김 감지
     }
 
     // MARK: - 에러 카드
@@ -962,6 +1069,7 @@ final class PlayerViewController: UIViewController {
         observer = nil
         presentationObserver?.invalidate()
         presentationObserver = nil
+        removePlaybackFailureObserver()   // D1
         avVC?.player?.pause()
         avVC?.player?.replaceCurrentItem(with: nil)
         avVC?.willMove(toParent: nil)
@@ -1019,6 +1127,7 @@ final class PlayerViewController: UIViewController {
     deinit {
         observer?.invalidate()
         presentationObserver?.invalidate()
+        removePlaybackFailureObserver()   // D1
         systemVolumeObservation?.invalidate()
         hideResolutionTimer?.invalidate()
         hideMetaTimer?.invalidate()
@@ -1146,11 +1255,6 @@ enum QualityLadder {
         return CGSize(width: side, height: side)
     }
 
-    /// cap(for:)로 건 상한이 허용하는 최고 등급(상한이 없으면 제한 없음).
-    static func ceiling(forCap cap: CGSize) -> Int {
-        cap.width > 0 ? Int(cap.width) * 9 / 16 : Int.max
-    }
-
     /// 배지 문구 — 팝업의 체크 행을 줄인 것. 1줄 = 실제 화질(자동이면 '자동(X)'),
     /// 2줄 = 수동 행이 체크돼 있는데 실제가 다를 때만 '{체크 행} 선택됨'(팝업의 '✓ 행 / 현재 X'와 같은 내용).
     static func badgeLines(actual: Int, choice: Int, options: [Int]) -> (first: String, second: String?) {
@@ -1164,5 +1268,58 @@ enum QualityLadder {
     static func rowSubtitle(row: Int, actual: Int) -> String? {
         guard actual > 0, row == 0 || row != actual else { return nil }
         return "현재 \(label(actual))"
+    }
+
+    // MARK: master playlist 파싱 (화질 고정용)
+
+    /// master playlist 본문에서 (해상도, media playlist 절대 URL)을 뽑는다.
+    /// tvOS 17에는 AVAssetVariant.url이 없어 직접 파싱한다. SOOP master의 특징(docs/20260930-quality-selection-v1.md §1-4):
+    /// CRLF 줄바꿈, `#EXT-X-STREAM-INF:` 다음 줄이 상대 URI(줄 끝에 ','가 붙기도 함), 속성은 RESOLUTION·BANDWIDTH·NAME.
+    static func renditions(fromPlaylist text: String, baseURL: URL) -> [(size: CGSize, url: URL)] {
+        // Character.isNewline은 CR·LF·CRLF(단일 grapheme)·기타 유니코드 줄바꿈을 모두 처리한다.
+        // SOOP master는 CRLF라 "\n"/"\r" 비교로는 한 줄도 나뉘지 않는다.
+        let lines = text.split(omittingEmptySubsequences: true, whereSeparator: { $0.isNewline }).map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }
+        var result: [(size: CGSize, url: URL)] = []
+        var i = 0
+        while i < lines.count {
+            guard lines[i].hasPrefix("#EXT-X-STREAM-INF:"), let size = resolution(inStreamInf: lines[i]) else {
+                i += 1; continue
+            }
+            // 다음 비(非)주석·비어있지 않은 줄이 URI
+            var j = i + 1
+            while j < lines.count, lines[j].isEmpty || lines[j].hasPrefix("#") { j += 1 }
+            if j < lines.count {
+                var uri = lines[j]
+                if uri.hasSuffix(",") { uri = String(uri.dropLast()) }          // SOOP은 URI 줄 끝에 ','를 붙인다
+                uri = uri.trimmingCharacters(in: .whitespaces)
+                if let url = URL(string: uri, relativeTo: baseURL)?.absoluteURL {
+                    result.append((size, url))
+                }
+            }
+            i = j + 1
+        }
+        return result
+    }
+
+    private static func resolution(inStreamInf line: String) -> CGSize? {
+        guard let value = attribute("RESOLUTION", in: line) else { return nil }
+        let parts = value.lowercased().split(separator: "x")
+        guard parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w > 0, h > 0 else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    /// `KEY=value` 추출. value가 따옴표로 묶여 있으면(예: NAME="hd") 그 안을, 아니면 콤마 또는 줄 끝까지.
+    private static func attribute(_ key: String, in line: String) -> String? {
+        guard let range = line.range(of: key + "=") else { return nil }
+        let rest = line[range.upperBound...]
+        if rest.first == "\"" {
+            let body = rest.dropFirst()
+            guard let end = body.firstIndex(of: "\"") else { return nil }
+            return String(body[..<end])
+        }
+        if let end = rest.firstIndex(of: ",") { return String(rest[..<end]) }
+        return String(rest)
     }
 }

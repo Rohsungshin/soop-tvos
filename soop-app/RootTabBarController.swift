@@ -1,8 +1,8 @@
 import UIKit
 
-// MARK: - 루트 탭바 컨트롤러 (v2: 4탭)
+// MARK: - 루트 탭바 컨트롤러 (v3: 5탭 — 설정 추가)
 //
-// HOME / LIVE / 검색 / MY 4개 탭. 각 탭은 UINavigationController로 감싸져
+// HOME / LIVE / 검색 / MY / 설정 5개 탭. 각 탭은 UINavigationController로 감싸져
 // 카테고리 → 방송 → 플레이어 식으로 깊이 진입 가능.
 // 다크 톤 통일, SOOP 브랜드 컬러로 선택 강조, SF Symbol 아이콘.
 
@@ -46,7 +46,15 @@ final class RootTabBarController: UITabBarController {
             tag: 3
         )
 
-        viewControllers = [homeNav, liveNav, searchNav, myNav]
+        let settingsNav = makeNav(
+            root: SettingsViewController(),
+            title: "설정",
+            image: UIImage(systemName: "gearshape"),
+            selected: UIImage(systemName: "gearshape.fill"),
+            tag: 4
+        )
+
+        viewControllers = [homeNav, liveNav, searchNav, myNav, settingsNav]
         selectedIndex = 0
     }
 
