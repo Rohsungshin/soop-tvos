@@ -212,13 +212,15 @@ TS 잔여 공간 0xFF stuffing(M1) 및 afc=0 방지(M2).
 
 ## 5. 푸시 · 머지
 
-(검증 후)
+- 2026-10-17: `feature/native-playback` → origin 푸시, PR #1 생성·머지(main `621404d`).
 
 ---
 
 ## 6. 실기기 설치
 
-(설치 후)
+- 2026-10-17: main 풀 → Apple TV 4K 2세대 "큰방"(ED4F9D49)에 Debug 빌드 설치·실행 완료
+  (USB 볼륨 DerivedData의 북마크 오류는 `-derivedDataPath /tmp/soop-dd`로 회피).
+- §7 체크리스트(T1~T7) 수동 확인 대기.
 
 ---
 
