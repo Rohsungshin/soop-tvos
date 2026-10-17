@@ -130,6 +130,11 @@ final class PlayerViewController: UIViewController {
     /// 트랜스포트 바 음량 항목 — AVPlayerViewController마다 한 번 만들어 화질 메뉴를 바꿀 때도 같은 인스턴스를 쓴다.
     private var volumeMenuItems: [UIMenuElement] = []
 
+    /// 네이티브 재생 세션(모드가 native일 때만 존재). 폴백 시 nil이 되고 CDN 경로로 이어진다.
+    private var nativeController: SOOPNativePlayerController?
+    /// 네이티브 폴백으로 CDN 자동 재생에 이미 넘어갔는지(토스트·재폴백 방지).
+    private var didFallbackFromNative = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = DS.Colors.background
@@ -643,6 +648,149 @@ final class PlayerViewController: UIViewController {
             showError(title: "스트림 정보 없음", description: "재생할 정보가 비어 있습니다.")
             return
         }
+        // 네이티브 모드: 공개 방송으로 확인된 방송만 원본 수신을 시도한다(docs/20261010 §2-3 게이트).
+        // 19+·비번방·실패 이력이 있으면 게이트가 닫혀 있으므로 그냥 CDN 경로로 진행한다.
+        if PlaybackSettings.mode == .native, Self.nativeGatePasses(info) {
+            startNativePlayback(info: info)
+            return
+        }
+        startCDNPlayback(info: info)
+    }
+
+    /// 네이티브 경로 게이트 — 공개(grade<19)·비번방 아님·라이브 방송만.
+    private static func nativeGatePasses(_ info: StreamInfo) -> Bool {
+        guard info.isLive, info.grade < 19, !info.isPasswordRoom else { return false }
+        return true
+    }
+
+    /// 네이티브 재생 — 원본 수신 → 루프백 HLS를 AVPlayer에 넘긴다. 실패하면 CDN 자동으로.
+    private func startNativePlayback(info: StreamInfo) {
+        let controller = SOOPNativePlayerController(quality: .p1080)
+        nativeController = controller
+        didFallbackFromNative = false
+
+        // 프리롤 문구 — 무엇을 기다리는지 알려준다.
+        preRollStatusLabel?.text = "원본 연결 중…"
+
+        controller.onPlaylistReady = { [weak self] in
+            guard let self = self, self.nativeController === controller,
+                  let url = controller.playlistURL else { return }
+            print("[Player] native playlist ready: \(url.absoluteString)")
+            self.playLoopbackHLS(url)
+        }
+        controller.onFallback = { [weak self] error in
+            guard let self = self, self.nativeController === controller else { return }
+            print("[Player] native failed: \(error.localizedDescription) → CDN fallback")
+            self.nativeController = nil
+            self.fallbackToCDN(info: info, reason: error)
+        }
+        controller.start(bjId: info.bjId, broadNo: info.broadNo)
+    }
+
+    /// 루프백 HLS URL로 AVPlayer를 띄운다(헤더·쿠키 불필요 — 127.0.0.1).
+    private func playLoopbackHLS(_ url: URL) {
+        let item = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: item)
+        let vc = AVPlayerViewController()
+        vc.player = player
+        vc.delegate = self
+        vc.videoGravity = .resizeAspect
+        vc.view.frame = view.bounds
+        vc.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        vc.view.alpha = 0
+        addChild(vc)
+        view.insertSubview(vc.view, belowSubview: preRollContainer)
+        vc.didMove(toParent: self)
+        avVC = vc
+
+        view.bringSubviewToFront(resolutionLabel)
+        view.bringSubviewToFront(volumeHUD)
+
+        player.volume = Self.savedVolume()
+        player.isMuted = pendingMuted
+        // 네이티브는 CDN 등급 사다리와 무관 — 메뉴는 안내 행 하나.
+        volumeMenuItems = makeTransportBarItems()
+        vc.transportBarCustomMenuItems = volumeMenuItems + [makeNativeQualityMenu()]
+        resolutionLabel.text = "원본 1080p"
+
+        observer = item.observe(\.status, options: [.new]) { [weak self] it, _ in
+            DispatchQueue.main.async {
+                guard let self = self, it === self.avVC?.player?.currentItem else { return }
+                if it.status == .readyToPlay {
+                    self.revealPlayer(item: it)
+                    self.observeNativeResolution()
+                } else if it.status == .failed {
+                    // 루프백 재생 실패 — CDN으로.
+                    guard let info = self.streamInfo else { return }
+                    self.nativeController?.stop()
+                    self.nativeController = nil
+                    self.fallbackToCDN(info: info, reason: .protocolError("loopback playback failed"))
+                }
+            }
+        }
+        observePlaybackFailure(for: item, info: streamInfo ?? info0())
+    }
+
+    /// StreamInfo가 nil일 일은 없지만 컴파일러를 위한 도우미.
+    private func info0() -> StreamInfo {
+        StreamInfo(bjId: "", broadNo: "", title: "", bjNick: "",
+                   viewURL: URL(string: "about:blank")!, timeShiftURL: nil, aid: nil,
+                   resolution: "", isLive: false, grade: 99, isPasswordRoom: false)
+    }
+
+    /// 네이티브 재생 중 실제 해상도 배지 갱신 — 기존 관찰 로직을 그대로 쓰고 문구만 원본으로.
+    private func observeNativeResolution() {
+        startObservingResolution(item: avVC?.player?.currentItem ?? AVPlayerItem(url: URL(string: "about:blank")!))
+    }
+
+    /// 네이티브 재생 중 화질 메뉴 — CDN 사다리와 무관한 안내 행.
+    private func makeNativeQualityMenu() -> UIMenu {
+        let action = UIAction(title: "네이티브 원본 (1080p 직접 수신)") { _ in }
+        action.subtitle = "설정에서 재생 방식을 바꿀 수 있습니다"
+        return UIMenu(title: "화질", image: UIImage(systemName: "gearshape"), children: [action])
+    }
+
+    /// 네이티브 실패 → CDN 자동 재생 + 토스트 1회.
+    private func fallbackToCDN(info: StreamInfo, reason: SOOPNativeError) {
+        guard !didFallbackFromNative else { return }
+        didFallbackFromNative = true
+        preRollStatusLabel?.text = "스트림 연결 중..."
+        // 기존 실패/폴백 상태를 리셋하고 CDN 경로로 처음부터.
+        didFallback = false
+        startCDNPlayback(info: info)
+        showToast("네이티브 재생 실패 — 일반 재생으로 전환했습니다\n(\(reason.localizedDescription))")
+    }
+
+    private func showToast(_ message: String) {
+        let label = UILabel()
+        label.text = message
+        label.textColor = DS.Colors.textPrimary
+        label.font = DS.Typography.caption
+        label.numberOfLines = 3
+        label.textAlignment = .center
+        label.backgroundColor = UIColor(white: 0, alpha: 0.75)
+        label.layer.cornerRadius = DS.Corner.button
+        label.clipsToBounds = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -40),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 40),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -40),
+        ])
+        label.layoutMargins = UIEdgeInsets(top: 12, left: 20, bottom: 12, right: 20)
+        UIView.animate(withDuration: 0.25, animations: { label.alpha = 1 }) { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                UIView.animate(withDuration: 0.4, animations: { label.alpha = 0 }) { _ in
+                    label.removeFromSuperview()
+                }
+            }
+        }
+    }
+
+    /// CDN(기존) 재생 — 원래 startPlayback의 본문.
+    private func startCDNPlayback(info: StreamInfo) {
         // AVPlayer에 넘길 요청 헤더. 로그인 쿠키는 SOOP 도메인에만 싣는다(playbackHeaders, D2).
         // 전체 URL에는 aid 토큰이 들어 있어 호스트만 찍는다(토큰 노출 방지).
         let headers = Self.playbackHeaders(for: info.viewURL)
@@ -1125,6 +1273,7 @@ final class PlayerViewController: UIViewController {
     }
 
     deinit {
+        nativeController?.stop()
         observer?.invalidate()
         presentationObserver?.invalidate()
         removePlaybackFailureObserver()   // D1

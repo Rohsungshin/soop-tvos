@@ -14,11 +14,13 @@ import Foundation
 enum PlaybackMode: Int, CaseIterable {
     case auto = 0
     case fixed = 1
+    case native = 2
 
     var label: String {
         switch self {
-        case .auto:  return "자동 (화질 자동 전환)"
-        case .fixed: return "고정 화질"
+        case .auto:   return "자동 (화질 자동 전환)"
+        case .fixed:  return "고정 화질"
+        case .native: return "네이티브 원본 (1080p)"
         }
     }
 
@@ -28,6 +30,8 @@ enum PlaybackMode: Int, CaseIterable {
             return "망 상태에 따라 화질이 자동으로 바뀝니다. 끊김이 가장 적습니다"
         case .fixed:
             return "고른 화질로 고정합니다. 자동 전환이 없는 대신 망이 느리면 끊길 수 있습니다"
+        case .native:
+            return "SOOP 미디어 서버에서 원본을 직접 받아 국내에서도 1080p로 봅니다. 비공식 경로라 실패 시 일반 재생으로 전환됩니다"
         }
     }
 }
@@ -38,6 +42,8 @@ enum PlaybackSettings {
     private static let qualityKey = "soop.player.quality"
     /// '자동'으로 돌려 둔 동안 기억해 두는 직전 고정 등급.
     private static let fixedQualityKey = "soop.playback.fixedQuality"
+    /// 재생 방식(auto/fixed/native). 네이티브 추가로 신설.
+    private static let modeKey = "soop.playback.mode"
 
     /// 설정 화면에 노출하는 고정 등급 사다리. 방송이 실제로 주는 등급만 적용되며,
     /// 고른 등급이 없으면 그 이하 중 가장 높은 등급으로 내려간다(QualityLadder.effective).
@@ -59,9 +65,21 @@ enum PlaybackSettings {
         return fixedLadder.contains(saved) ? saved : 1080
     }
 
-    /// quality에서 파생되는 모드.
+    /// 재생 방식. 저장값을 그대로 쓴다(네이티브는 quality와 독립).
+    /// 예전 버전에는 모드 저장이 없었고 quality에서 파생했으므로, 저장값이 없으면 예전 파생 규칙을 따른다.
     static var mode: PlaybackMode {
-        get { quality == 0 ? .auto : .fixed }
-        set { quality = (newValue == .auto) ? 0 : fixedQuality }
+        get {
+            if UserDefaults.standard.object(forKey: modeKey) != nil {
+                let raw = UserDefaults.standard.integer(forKey: modeKey)
+                return PlaybackMode(rawValue: raw) ?? (quality == 0 ? .auto : .fixed)
+            }
+            return quality == 0 ? .auto : .fixed
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: modeKey)
+            if UserDefaults.standard.object(forKey: qualityKey) == nil {
+                quality = (newValue == .auto) ? 0 : fixedQuality
+            }
+        }
     }
 }
