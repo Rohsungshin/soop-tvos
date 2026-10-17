@@ -9,13 +9,16 @@
 /* Begin PBXBuildFile section */
 		0555E4BBB42625CE26D0E6EE /* SettingsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18C6158E73EFBF4795B1FE18 /* SettingsViewController.swift */; };
 		05B3B8913BD930CC3B9733AE /* LiveListViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2568234AD72D7C205D3C7958 /* LiveListViewController.swift */; };
+		148812C30F5C8D903E571F9A /* LocalHLSServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40A2871807FD3EB1B0343ACF /* LocalHLSServer.swift */; };
 		184967B6CE4154F3B9E35BAE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA39C3812075BCD663740327 /* AppDelegate.swift */; };
 		29603C9AE2911E0A99BAA4D2 /* RootTabBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C734E25326258F44C0409BDB /* RootTabBarController.swift */; };
+		3E35E3D0E06842958F61C342 /* TSMuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765105FC8D0C4CFD2D6CD803 /* TSMuxer.swift */; };
 		43FE9129D21171274ACDA381 /* LoginServerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 850A062584189EDBD990120D /* LoginServerClient.swift */; };
 		4EA5F480C09487792A2AB405 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8941AC06A65AC53305B588E7 /* Assets.xcassets */; };
 		66841800A64E87FE763B368F /* ExploreViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF3C5A4ECA2E26683B4B67D /* ExploreViewController.swift */; };
 		8001A7E733CFC611564364D5 /* SOOPAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F5960EEB8C7C5551269DEEA /* SOOPAPIClient.swift */; };
 		806EF8F5D9150EA72F120886 /* MyViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F244F8ED3D77ECF9075D0DF /* MyViewController.swift */; };
+		932305DF1865B806EEC790BE /* SOOPNativePlayerController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1BEF22336299414C733E9FD /* SOOPNativePlayerController.swift */; };
 		95B272DE78A9D8CB29B6A469 /* LiveCategoriesViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B712BBA5CC72A6B8802113CC /* LiveCategoriesViewController.swift */; };
 		9D8F6F29F1535307C621139C /* ServerLoginViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD60C07BDA2D05CEDADC0C3B /* ServerLoginViewController.swift */; };
 		C7B683ABADAEEBB48663010F /* SearchViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0446F9B64863622664FC4678 /* SearchViewController.swift */; };
@@ -23,16 +26,20 @@
 		DE395073FA1D6901F4782DF4 /* PlaybackSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7FBB9EB3396170F15FB3F97 /* PlaybackSettings.swift */; };
 		E4470831D4953A203387A764 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB84F945F32A31385078D069 /* DesignSystem.swift */; };
 		EB8FAD131E73FD7AFAAC38C8 /* HomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CAAA9260F324A43BD2918AC /* HomeViewController.swift */; };
+		F302CCEE970E0FE0F0FF1643 /* SOOPNativeReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 191C9F0BA9401AFFFFB90F01 /* SOOPNativeReceiver.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		00A208C259F1A14EC8DE351E /* soop-app.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "soop-app.entitlements"; sourceTree = "<group>"; };
 		0446F9B64863622664FC4678 /* SearchViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchViewController.swift; sourceTree = "<group>"; };
 		18C6158E73EFBF4795B1FE18 /* SettingsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewController.swift; sourceTree = "<group>"; };
+		191C9F0BA9401AFFFFB90F01 /* SOOPNativeReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOPNativeReceiver.swift; sourceTree = "<group>"; };
 		1F5960EEB8C7C5551269DEEA /* SOOPAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOPAPIClient.swift; sourceTree = "<group>"; };
 		2568234AD72D7C205D3C7958 /* LiveListViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveListViewController.swift; sourceTree = "<group>"; };
+		40A2871807FD3EB1B0343ACF /* LocalHLSServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHLSServer.swift; sourceTree = "<group>"; };
 		5D952DA431EA5FEF91B356C2 /* soop-app.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "soop-app.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		5DF3C5A4ECA2E26683B4B67D /* ExploreViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreViewController.swift; sourceTree = "<group>"; };
+		765105FC8D0C4CFD2D6CD803 /* TSMuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSMuxer.swift; sourceTree = "<group>"; };
 		7F244F8ED3D77ECF9075D0DF /* MyViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyViewController.swift; sourceTree = "<group>"; };
 		850A062584189EDBD990120D /* LoginServerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginServerClient.swift; sourceTree = "<group>"; };
 		8844762210C5262610FE7738 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -45,6 +52,7 @@
 		B712BBA5CC72A6B8802113CC /* LiveCategoriesViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCategoriesViewController.swift; sourceTree = "<group>"; };
 		C734E25326258F44C0409BDB /* RootTabBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabBarController.swift; sourceTree = "<group>"; };
 		E7FBB9EB3396170F15FB3F97 /* PlaybackSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackSettings.swift; sourceTree = "<group>"; };
+		F1BEF22336299414C733E9FD /* SOOPNativePlayerController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOPNativePlayerController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -67,6 +75,7 @@
 				8844762210C5262610FE7738 /* Info.plist */,
 				B712BBA5CC72A6B8802113CC /* LiveCategoriesViewController.swift */,
 				2568234AD72D7C205D3C7958 /* LiveListViewController.swift */,
+				40A2871807FD3EB1B0343ACF /* LocalHLSServer.swift */,
 				850A062584189EDBD990120D /* LoginServerClient.swift */,
 				7F244F8ED3D77ECF9075D0DF /* MyViewController.swift */,
 				E7FBB9EB3396170F15FB3F97 /* PlaybackSettings.swift */,
@@ -77,6 +86,9 @@
 				18C6158E73EFBF4795B1FE18 /* SettingsViewController.swift */,
 				00A208C259F1A14EC8DE351E /* soop-app.entitlements */,
 				1F5960EEB8C7C5551269DEEA /* SOOPAPIClient.swift */,
+				F1BEF22336299414C733E9FD /* SOOPNativePlayerController.swift */,
+				191C9F0BA9401AFFFFB90F01 /* SOOPNativeReceiver.swift */,
+				765105FC8D0C4CFD2D6CD803 /* TSMuxer.swift */,
 			);
 			path = "soop-app";
 			sourceTree = "<group>";
@@ -189,15 +201,19 @@
 				EB8FAD131E73FD7AFAAC38C8 /* HomeViewController.swift in Sources */,
 				95B272DE78A9D8CB29B6A469 /* LiveCategoriesViewController.swift in Sources */,
 				05B3B8913BD930CC3B9733AE /* LiveListViewController.swift in Sources */,
+				148812C30F5C8D903E571F9A /* LocalHLSServer.swift in Sources */,
 				43FE9129D21171274ACDA381 /* LoginServerClient.swift in Sources */,
 				806EF8F5D9150EA72F120886 /* MyViewController.swift in Sources */,
 				DE395073FA1D6901F4782DF4 /* PlaybackSettings.swift in Sources */,
 				D4C988CB2BE0AB0F4DEAAF5B /* PlayerViewController.swift in Sources */,
 				29603C9AE2911E0A99BAA4D2 /* RootTabBarController.swift in Sources */,
 				8001A7E733CFC611564364D5 /* SOOPAPIClient.swift in Sources */,
+				932305DF1865B806EEC790BE /* SOOPNativePlayerController.swift in Sources */,
+				F302CCEE970E0FE0F0FF1643 /* SOOPNativeReceiver.swift in Sources */,
 				C7B683ABADAEEBB48663010F /* SearchViewController.swift in Sources */,
 				9D8F6F29F1535307C621139C /* ServerLoginViewController.swift in Sources */,
 				0555E4BBB42625CE26D0E6EE /* SettingsViewController.swift in Sources */,
+				3E35E3D0E06842958F61C342 /* TSMuxer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

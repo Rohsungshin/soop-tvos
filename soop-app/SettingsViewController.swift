@@ -5,6 +5,7 @@ import UIKit
 // 5번째 탭. 현재는 '영상 플레이 방식' 하나만 노출한다:
 //   • 자동 (화질 자동 전환) — AVPlayer의 ABR에 맡긴다. 끊김이 가장 적다.
 //   • 고정 화질            — 고른 등급의 media playlist를 직접 재생해 전환 자체를 막는다.
+//   • 네이티브 원본 (1080p) — SOOP 미디어 서버에서 원본을 직접 수신해 재생한다(docs/20261010).
 //
 // 저장소는 플레이어의 화질 메뉴와 공유한다(PlaybackSettings = `soop.player.quality`).
 // 여기서 바꾼 값은 다음 재생부터 적용되고, 재생 중 트랜스포트 바에서 바꾼 값도 여기에 그대로 비친다.
@@ -91,6 +92,7 @@ final class SettingsViewController: UIViewController {
         for (m, card) in modeCards {
             card.setSelected(m == mode)
         }
+        // 고정 등급 행은 '고정 화질'에서만 의미가 있다. 자동·네이티브일 때는 흐리게.
         qualityRow.setDimmed(mode != .fixed)
         qualityRow.setSelected(PlaybackSettings.fixedQuality)
     }

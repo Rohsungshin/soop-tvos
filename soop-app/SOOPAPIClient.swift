@@ -56,6 +56,10 @@ struct StreamInfo {
     let aid: String?
     let resolution: String
     let isLive: Bool
+    /// SOOP 등급(19 = 성인). 네이티브 경로 게이트용(docs/20261010 §2-3). 기본 0(일반).
+    let grade: Int
+    /// 비밀번호 방송 여부. 네이티브 경로 게이트용.
+    let isPasswordRoom: Bool
 }
 
 enum SOOPAPIError: Error {
@@ -878,6 +882,7 @@ final class SOOPAPIClient {
             let bjNick = channel["BJNICK"] as? String ?? bjId
             let title = channel["TITLE"] as? String ?? ""
             let resolution = channel["RESOLUTION"] as? String ?? ""
+            let grade = (channel["GRADE"] as? Int) ?? Int(channel["GRADE"] as? String ?? "0") ?? 0
             let initialAid = (channel["AID"] as? String) ?? (channel["hls_authentication_key"] as? String)
             let tsURLString = channel["TS"] as? String ?? ""
             let actualBNO = (channel["BNO"] as? String) ?? broadNo
@@ -912,7 +917,8 @@ final class SOOPAPIClient {
                                 title: title, bjNick: bjNick,
                                 viewURL: primary,
                                 timeShiftURL: fallback,
-                                aid: aid, resolution: resolution, isLive: true
+                                aid: aid, resolution: resolution, isLive: true,
+                                grade: grade, isPasswordRoom: isPasswordRoom
                             )
                             completion(.success(info))
                         case .failure:
@@ -922,7 +928,8 @@ final class SOOPAPIClient {
                                     bjId: bjId, broadNo: actualBNO,
                                     title: title, bjNick: bjNick,
                                     viewURL: ts, timeShiftURL: ts,
-                                    aid: aid, resolution: resolution, isLive: true
+                                    aid: aid, resolution: resolution, isLive: true,
+                                    grade: grade, isPasswordRoom: isPasswordRoom
                                 )
                                 completion(.success(info))
                             } else {
@@ -935,7 +942,8 @@ final class SOOPAPIClient {
                         bjId: bjId, broadNo: actualBNO,
                         title: title, bjNick: bjNick,
                         viewURL: ts, timeShiftURL: ts,
-                        aid: nil, resolution: resolution, isLive: true
+                        aid: nil, resolution: resolution, isLive: true,
+                        grade: grade, isPasswordRoom: isPasswordRoom
                     )
                     completion(.success(info))
                 } else if isPasswordRoom, case .failure(.streamUnavailable(_)) = aidResult {
