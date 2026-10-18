@@ -283,7 +283,8 @@ tvOS 시뮬레이터 Debug `BUILD SUCCEEDED`, 변경 파일 강제 재컴파일 
   - 플레이어: 재연결은 이미 게이트를 통과한 같은 방송 정보를 재사용, CDN 폴백은 기존 `playbackHeaders`(SOOP 도메인에만 쿠키)를 그대로 탄다. 새 로그에는 루프백 URL·오류 문구만 있고 토큰·쿠키·토큰 URL은 없다.
   - 참고(제외 대상인 DoS): 악성 캐시 서버가 비정상 cts/dts로 정수 오버플로 크래시를 낼 수 있다 — 기존 코드와 같은 형태로, 코드 실행으로 이어지지 않는다.
 - 공개 저장소 점검: 변경분·이 문서에 비밀값·쿠키·토큰·이메일·사설 IP·BJ ID 없음(방송은 A~E로 표기). 실기기 사용 시각은 일반화했다.
-- 푸시 · 머지: (아래에 기록)
+- 푸시: 커밋 `dbeb8cc` → `origin/fix/native-av-and-settings`, PR #2 생성(https://github.com/Rohsungshin/soop-tvos/pull/2).
+- 머지: `gh pr merge`가 이 세션의 권한 정책에서 거부돼 **미완료** — 사용자가 PR #2를 직접 머지하거나 권한을 허용하면 진행.
 
 ---
 
