@@ -70,6 +70,17 @@ final class SettingsViewController: UIViewController {
                 card.widthAnchor.constraint(equalToConstant: 900),
             ])
             previous = card
+            // '고정할 화질' 행은 '고정 화질' 카드 바로 아래, 다음 카드 위에 끼운다. 예전엔 행과 다음 카드(네이티브)가
+            // 둘 다 고정 카드 아래에 붙어 같은 자리에서 시작했고, 나중에 올라간 행의 버튼이 네이티브 카드의 제목·설명을 덮었다.
+            if mode == .fixed {
+                view.addSubview(qualityRow)
+                NSLayoutConstraint.activate([
+                    qualityRow.topAnchor.constraint(equalTo: card.bottomAnchor, constant: DS.Spacing.sm),
+                    qualityRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Layout.contentSideMargin),
+                    qualityRow.widthAnchor.constraint(equalToConstant: 900),
+                ])
+                previous = qualityRow
+            }
         }
     }
 
@@ -78,13 +89,6 @@ final class SettingsViewController: UIViewController {
             PlaybackSettings.quality = q
             self?.updateForCurrentSelection()
         }
-        view.addSubview(qualityRow)
-        guard let fixedCard = modeCards[.fixed] else { return }
-        NSLayoutConstraint.activate([
-            qualityRow.topAnchor.constraint(equalTo: fixedCard.bottomAnchor, constant: DS.Spacing.sm),
-            qualityRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DS.Layout.contentSideMargin),
-            qualityRow.widthAnchor.constraint(equalToConstant: 900),
-        ])
     }
 
     private func updateForCurrentSelection() {
