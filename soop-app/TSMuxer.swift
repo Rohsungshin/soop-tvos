@@ -11,6 +11,12 @@ import Foundation
 //
 // 시간축: 패킷 dts(100ns 단위)에서 첫 도착값 − 1초를 원점으로 잡는다(오디오 512ms 묶음이
 // 첫 영상 dts보다 먼저 올 수 있다 — 참조 구현의 관찰과 동일).
+//
+// 세그먼트 조립은 도착 순서가 아니라 타임스탬프 기준이다. 오디오 묶음(약 0.5초)은 묶음이 끝난 뒤에
+// 보내져 같은 시각의 영상보다 약 0.47초 늦게 도착한다(2026-10-18 공개 방송 16개 실측). 경계 직전
+// 묶음이 경계 뒤에 도착하므로, 세그를 IDR에서 바로 닫으면 그 묶음이 갈 곳이 없다 — 예전 구현은
+// 이것을 버려 2초 세그마다 묶음 하나(오디오의 약 25%)를 잃었다. 경계 이전 오디오가 다 올 때까지
+// 세그를 열어 두었다가 시각순으로 섞어 내보낸다.
 
 final class TSMuxer {
 
@@ -21,6 +27,8 @@ final class TSMuxer {
         /// 2초에 가까워 세그가 2초가 되는데 EXTINF 1.0 고정이면 Apple이 세그를 불완전으로
         /// 보고 -12976으로 거부한다(2026-10-17 실측).
         let durationMS: Int
+        /// 이 세그 앞에서 방송 송출이 다시 시작됐다 — 플레이리스트에 EXT-X-DISCONTINUITY를 붙인다.
+        let discontinuity: Bool
     }
 
     private(set) var videoFrames = 0
@@ -45,23 +53,29 @@ final class TSMuxer {
     private var wroteAudioConfig = false
     /// 오디오 PTS 단조 보장용(패킷 경계를 넘어 유지).
     private var lastAudioPTSTicks: Int64 = -1
-    /// 오디오 PES 보류 버퍼 — 실서버는 오디오 묶음이 비디오보다 늦게 도착해도 PTS는 이른
-    /// 시각을 가진다(2026-10-17 실측: 첫 묶음 PTS 0.0초가 비디오 1.4초 뒤에 배치돼 ffmpeg/Apple
-    /// 디먹서 dts 역전). feedVideo 시각에 맞춰 끼워 넣는다.
-    private var pendingAudio: [(ptsTicks: UInt64, payload: Data)] = []
-    /// 세그 첫 비디오의 dts(틱) — 세그 시작보다 이른 오디오 폐기 기준.
-    private var firstVideoDtsTicks: UInt64?
-    /// 세그 첫 비디오의 ms — 세그 실제 길이(EXTINF) 산출 기준.
-    private var segmentStartVideoMS = 0
     /// 마지막 비디오 dts(틱) — 100ns→틱 환산 반올림 역전 방지.
     private var lastVideoDtsTicks: UInt64 = 0
     private var sawFirstVideoDts = false
 
     // 세그먼트 상태
-    private var currentSegment = Data()
-    private var segmentHasVideo = false
+    /// 아직 세그먼트로 내보내지 않은 PES. ticks는 비디오 dts / 오디오 pts(90kHz).
+    private struct PendingPES {
+        let ticks: UInt64
+        let isVideo: Bool
+        let pes: Data
+    }
+    private var pendingPES: [PendingPES] = []
+    /// 세그먼트 경계(IDR dts 틱). cuts[0]은 아직 내보내지 않은 가장 오래된 세그의 시작이다.
+    private var cuts: [UInt64] = []
+    /// 지금까지 받은 오디오 묶음의 최대 PTS. 오디오는 시각순으로 오므로 이 값이 경계를 넘으면
+    /// 그 경계 이전 오디오는 전부 도착한 것이다.
+    private var latestAudioTicks: UInt64?
+    /// 오디오 대기 한도. 오디오가 끊긴 방송에서도 세그가 멈추지 않게, 영상이 경계를 이만큼 지나면
+    /// 오디오를 더 기다리지 않고 닫는다.
+    private static let audioWaitTicks: UInt64 = 2 * 90_000
     private var segmentIndex = 0
-    private var lastVideoTimestampMS = 0
+    /// 송출 재시작 뒤 첫 세그에 discontinuity를 실어야 하는지.
+    private var pendingDiscontinuity = false
 
     /// 세그먼트 길이(초). 2026-10-03 실험에서 1초 세그먼트로 stall 0을 확인했다.
     var segmentDurationMS = 1000
@@ -87,35 +101,72 @@ final class TSMuxer {
 
         if kind == 73 || kind == 80 {
             let sequence = body.readLE64(at: 20)
+            let dts = body.readLE64(at: 41)
+            if isRestart(sequence: sequence, last: lastVideoSeq, resendWindow: 1000, dts100ns: dts) { restartTimeline() }
             guard lastVideoSeq == .max || sequence > lastVideoSeq else { duplicates += 1; return }
             lastVideoSeq = sequence
-            let dts = body.readLE64(at: 41)
             let cts = Int32(truncatingIfNeeded: body.readLE64(at: 57))
             feedVideo(raw: raw, dts100ns: dts, cts100ns: cts)
         } else if kind == 65 {
             let sequence = body.readLE64(at: 20)
+            let dts = body.readLE64(at: 41)
+            if isRestart(sequence: sequence, last: lastAudioSeq, resendWindow: 100, dts100ns: dts) { restartTimeline() }
             guard lastAudioSeq == .max || sequence > lastAudioSeq else { duplicates += 1; return }
             lastAudioSeq = sequence
-            let dts = body.readLE64(at: 41)
             feedAudio(raw: raw, dts100ns: dts)
         }
+    }
+
+    // MARK: - 송출 재시작
+    //
+    // BJ가 송출을 끊었다 다시 켜면 같은 연결로 시퀀스·프레임 번호·타임스탬프가 처음부터 다시 오고 해상도·
+    // 샘플레이트도 바뀔 수 있다(2026-10-18 15분 실측: 영상 seq 170676→55, dts 2844초→2.3초,
+    // 1080p60→720p30, 오디오 48k→44.1k). 예전엔 시퀀스 중복 검사가 이후 패킷을 전부 버려 화면이 멈추고
+    // 소리가 다시 나오지 않았다(수신은 계속돼 16초 무수신 폴백도 걸리지 않음).
+    // keep-alive 재전송은 영상 약 30·오디오 1~2개만 되돌아오므로 그보다 훨씬 큰 역행만 재시작으로 본다.
+
+    private func isRestart(sequence: UInt64, last: UInt64, resendWindow: UInt64, dts100ns: UInt64) -> Bool {
+        if last != .max, last > sequence, last - sequence > resendWindow { return true }
+        // 원점(첫 dts − 1초)보다 이른 타임스탬프는 재전송으로 나올 수 없다 — 새 시간축이다.
+        if let o = origin, dts100ns < o { return true }
+        return false
+    }
+
+    /// 남은 내용을 내보내고 시간축을 새로 잡는다. 다음 세그는 EXT-X-DISCONTINUITY로 표시한다.
+    private func restartTimeline() {
+        finishSegment()
+        pendingPES.removeAll()
+        origin = nil
+        sps = nil
+        pps = nil
+        lastVideoSeq = .max
+        lastAudioSeq = .max
+        lastAudioPTSTicks = -1
+        lastVideoDtsTicks = 0
+        sawFirstVideoDts = false
+        latestAudioTicks = nil
+        pendingDiscontinuity = segmentIndex > 0   // 아직 아무것도 안 내보냈으면 표시할 경계가 없다
     }
 
     // MARK: - 영상 (Annex B → PES)
 
     private func feedVideo(raw: Data, dts100ns: UInt64, cts100ns: Int32) {
-        if origin == nil { origin = dts100ns >= 1_000_000 ? dts100ns - 1_000_000 : 0 }
+        // 원점 = 첫 dts − 1초(10,000,000 × 100ns). 0.1초로 잡혀 있어 오디오가 영상보다 0.1초 넘게
+        // 먼저 오는 방송에서 첫 오디오 PTS가 음수 → 0으로 잘렸다(2026-10-18 실측).
+        if origin == nil { origin = dts100ns >= 10_000_000 ? dts100ns - 10_000_000 : 0 }
         // 90kHz 틱 직접 계산(100ns * 9 / 1000). ms 왕복 반올림이 PTS 겹침을 만들었다(2026-10-12 실측).
         let originTicks = origin! * 9 / 1000
         var dtsTicks = dts100ns * 9 / 1000 - originTicks
         if !sawFirstVideoDts { lastVideoDtsTicks = dtsTicks; sawFirstVideoDts = true }
-        var ptsTicks = dtsTicks + UInt64(truncatingIfNeeded: Int64(cts100ns) * 9 / 10_000)
+        // cts도 dts와 같은 100ns 단위다(참조 구현 cts/10_000 = ms). 예전엔 9/10_000으로 환산해
+        // B-frame 오프셋이 1/10이 됐고, B-frame 방송(공개 방송 16개 중 6개)에서 영상이
+        // 표시 순서가 뒤섞인 채 오디오보다 최대 수십 ms 앞서 나왔다(2026-10-18 실측).
+        var ptsTicks = dtsTicks + UInt64(truncatingIfNeeded: Int64(cts100ns) * 9 / 1000)
         // 서버 dts는 100ns 해상도 — 틱 환산 정수나눗셈에서 서로 다른 dts가 같은 틱이 되거나
         // 1틱 역전할 수 있다(2026-10-17 실측: 'dts 119 >= 118'). Apple은 1틱 역전도 거부한다.
         if dtsTicks <= lastVideoDtsTicks { dtsTicks = lastVideoDtsTicks + 1 }
         if ptsTicks < dtsTicks { ptsTicks = dtsTicks }   // B-frame도 dts 이전일 수 없다
         lastVideoDtsTicks = dtsTicks
-        let dtsMS = Int(dtsTicks / 90)   // 세그먼트 길이 판정은 ms로
 
         let nals = splitAnnexB(raw)
         var keyframe = false
@@ -127,13 +178,12 @@ final class TSMuxer {
         }
         guard let s = sps, let p = pps else { return }   // SPS/PPS 도달 전까지는 먹지 않는다(참조와 동일)
 
-        // 세그먼트 경계: 길이 충족 + 이번 프레임이 IDR → 이전 내용을 닫고 이 프레임부터 새 세그먼트.
+        // 세그먼트 경계: 열린 세그가 길이를 채웠고 이번 프레임이 IDR → 이 프레임부터 새 세그먼트.
         // (경계를 '닫은 뒤 프레임'이 아니라 '닫는 시점의 IDR'로 잡아야 세그먼트 첫 프레임이 IDR가 된다.)
-        if keyframe, lastVideoTimestampMS >= (segmentIndex + 1) * segmentDurationMS, !currentSegment.isEmpty {
-            flushAudioUpTo(dtsTicks: dtsTicks)   // 세그 경계 직전까지의 오디오를 이번 세그에
-            finishSegment()
+        if keyframe, cuts.last.map({ dtsTicks - $0 >= UInt64(segmentDurationMS) * 90 }) ?? true {
+            cuts.append(dtsTicks)
         }
-        flushAudioUpTo(dtsTicks: dtsTicks)
+        guard !cuts.isEmpty else { return }   // 첫 IDR 전 프레임으로는 세그를 시작할 수 없다
 
         // AUD 없이는 AVPlayer가 재생을 시작하지 못한다(2026-10-03 실측). 모든 접근 단위 앞에 삽입.
         var pes = Data()
@@ -148,18 +198,16 @@ final class TSMuxer {
             pes.appendAnnexB(nal)
         }
 
-        if currentSegment.isEmpty { firstVideoDtsTicks = dtsTicks; segmentStartVideoMS = dtsMS }   // 세그 첫 비디오
         // B-frame(cts≠0) 프레임만 PTS+DTS를 싣는다. B-frame 없는 프레임에 DTS 필드를
         // 강제로 싣으면 Apple mpeg2parser가 트랙 파싱 직후 -12976으로 죽는다
         // (2026-10-17 시뮬레이터 실측 — PTS만 싣는 순간 재생 개시).
         let hasBFrame = cts100ns != 0
-        currentSegment.append(contentsOf: tsPacketize(
-            payload: pesPayload(data: pes, streamID: 0xe0, ptsTicks: ptsTicks, dtsTicks: hasBFrame ? dtsTicks : nil, unbounded: true),
-            pid: videoPID, randomAccess: true, cc: &ccVideo, pcrTicks: dtsTicks   // 모든 비디오 PES에 PCR
+        pendingPES.append(PendingPES(
+            ticks: dtsTicks, isVideo: true,
+            pes: pesPayload(data: pes, streamID: 0xe0, ptsTicks: ptsTicks, dtsTicks: hasBFrame ? dtsTicks : nil, unbounded: true)
         ))
-        segmentHasVideo = segmentHasVideo || keyframe
         videoFrames += 1
-        lastVideoTimestampMS = max(lastVideoTimestampMS, dtsMS)
+        emitReadySegments()
     }
 
     // MARK: - 오디오 (ADTS → PES)
@@ -167,7 +215,7 @@ final class TSMuxer {
     private static let sampleRates: [Int] = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
 
     private func feedAudio(raw: Data, dts100ns: UInt64) {
-        if origin == nil { origin = dts100ns >= 1_000_000 ? dts100ns - 1_000_000 : 0 }
+        if origin == nil { origin = dts100ns >= 10_000_000 ? dts100ns - 10_000_000 : 0 }
         // 서버는 오디오를 512ms 묶음(여러 ADTS 프레임)으로 보낸다. ffmpeg TS도 묶음당 1 PES를
         // 쓴다 — 프레임별로 쪼개 PES마다 PTS를 주면 Apple mpeg2parser가 -12976으로 거부했다
         // (2026-10-16 tvOS 시뮬레이터 실측). 묶음 전체를 한 PES에 싣는다.
@@ -177,46 +225,63 @@ final class TSMuxer {
         if ptsTicks <= lastAudioPTSTicks { ptsTicks = lastAudioPTSTicks + 1 }   // 단조 보장
         lastAudioPTSTicks = ptsTicks
         audioFrames += 1
-        pendingAudio.append((UInt64(max(0, ptsTicks)),
-                             pesPayload(data: raw, streamID: 0xc0, ptsTicks: UInt64(max(0, ptsTicks)), dtsTicks: nil)))
-    }
-
-    /// 보류 오디오 중 dtsTicks 이전 시각의 PES를 세그먼트에 끼워 넣는다(비디오 PES 직전 호출).
-    /// 세그 시작(origin 시각)보다 이른 오디오는 버린다 — 세그 첫 비디오(0.1초)보다 앞선
-    /// 오디오 PTS(0.0초)가 세그 안에 남으면 Apple mpeg2parser가 -12976으로 거부한다
-    /// (2026-10-17 실서버 실측).
-    private func flushAudioUpTo(dtsTicks: UInt64) {
-        guard !pendingAudio.isEmpty else { return }
-        let floorTicks = firstVideoDtsTicks
-        let ready = pendingAudio.filter { $0.ptsTicks <= dtsTicks && (floorTicks == nil || $0.ptsTicks >= floorTicks!) }
-        if ready.isEmpty {
-            pendingAudio.removeAll { $0.ptsTicks <= dtsTicks }   // 이른 오디오는 그냥 버림
-            return
-        }
-        for a in ready {
-            currentSegment.append(contentsOf: tsPacketize(payload: a.payload, pid: audioPID, randomAccess: true, cc: &ccAudio))
-        }
-        pendingAudio.removeAll { p in p.ptsTicks <= dtsTicks }
+        let pts = UInt64(max(0, ptsTicks))
+        // 아직 내보내지 않은 가장 오래된 세그보다 이른 오디오는 버린다. 첫 영상 이전 오디오가 여기에
+        // 해당한다 — 세그 첫 비디오보다 앞선 오디오 PTS가 세그 안에 남으면 Apple mpeg2parser가
+        // -12976으로 거부한다(2026-10-17 실서버 실측). 이후 세그는 오디오를 기다렸다 닫으므로 버릴 일이 없다.
+        guard let oldestStart = cuts.first, pts >= oldestStart else { return }
+        pendingPES.append(PendingPES(ticks: pts, isVideo: false,
+                                     pes: pesPayload(data: raw, streamID: 0xc0, ptsTicks: pts, dtsTicks: nil)))
+        latestAudioTicks = max(latestAudioTicks ?? 0, pts)
+        emitReadySegments()
     }
 
     // MARK: - 세그먼트
 
+    /// 영상 경계가 정해졌고 그 경계 이전 오디오도 다 온(또는 대기 한도를 넘긴) 세그를 순서대로 내보낸다.
+    private func emitReadySegments() {
+        while cuts.count >= 2 {
+            let end = cuts[1]
+            let audioArrived = (latestAudioTicks ?? 0) >= end
+            let waitedEnough = lastVideoDtsTicks >= end + Self.audioWaitTicks
+            guard audioArrived || waitedEnough else { return }
+            emitSegment(start: cuts[0], end: end)
+            cuts.removeFirst()
+        }
+    }
 
-
-    /// 현재 세그먼트를 닫아 내보낸다. 호출부가 방송 종료 등으로 강제로 닫을 때도 쓴다.
-    func finishSegment() {
-        guard !currentSegment.isEmpty else { return }
+    /// [start, end) 시각의 PES를 시각순으로 섞어 세그먼트 하나로 내보낸다. 오디오 묶음은 시작 시각이 속한
+    /// 세그에 통째로 들어간다(경계를 넘어 이어지는 부분은 다음 세그 앞쪽 영상과 겹쳐 재생된다).
+    private func emitSegment(start: UInt64, end: UInt64) {
+        var body = pendingPES.filter { $0.ticks < end }
+        pendingPES.removeAll { $0.ticks < end }
+        body.sort { ($0.ticks, $0.isVideo ? 0 : 1) < ($1.ticks, $1.isVideo ? 0 : 1) }
         var out = Data()
         out.append(contentsOf: pat())
         out.append(contentsOf: pmt())
         out.append(contentsOf: sdt())
-        out.append(currentSegment)
-        let dur = Int(lastVideoTimestampMS - segmentStartVideoMS)
-        onSegment?(Segment(data: out, sequence: segmentIndex, durationMS: max(1000, dur)))
+        for p in body {
+            if p.isVideo {
+                out.append(tsPacketize(payload: p.pes, pid: videoPID, randomAccess: true, cc: &ccVideo, pcrTicks: p.ticks))   // 모든 비디오 PES에 PCR
+            } else {
+                out.append(tsPacketize(payload: p.pes, pid: audioPID, randomAccess: true, cc: &ccAudio))
+            }
+        }
+        // 길이 = 다음 경계 − 이번 경계(실제 시각). 예전엔 마지막 프레임 길이만큼 짧게 적었다.
+        onSegment?(Segment(data: out, sequence: segmentIndex, durationMS: Int((end - start) / 90), discontinuity: pendingDiscontinuity))
+        pendingDiscontinuity = false
         segmentIndex += 1
-        currentSegment.removeAll(keepingCapacity: true)
-        segmentHasVideo = false
-        firstVideoDtsTicks = nil
+    }
+
+    /// 남은 내용을 모두 세그먼트로 내보낸다. 호출부가 방송 종료 등으로 강제로 닫을 때 쓴다.
+    func finishSegment() {
+        while cuts.count >= 2 {
+            emitSegment(start: cuts[0], end: cuts[1])
+            cuts.removeFirst()
+        }
+        guard let start = cuts.first, !pendingPES.isEmpty else { return }
+        emitSegment(start: start, end: max(lastVideoDtsTicks, latestAudioTicks ?? 0) + 1)
+        cuts.removeAll()
     }
 
     var hasEmittedAnySegment: Bool { segmentIndex > 0 }
@@ -352,8 +417,10 @@ final class TSMuxer {
         ])
         // ISO 13818-1 PTS/DTS 부호화: '0010' prefix(b0 상위 4bit) + 33bit + marker 비트.
         // prefix 누락 시 디먹서가 PTS를 폐기한다(2026-10-12 하니스 실측 — 첫 PTS가 0x1FFFFFFFF로 디코드됨).
-        // PTS는 '0010' prefix(0x21 기본), DTS는 '0001'(0x11) — ISO 13818-1 2.4.3.7 표 2-18.
-        // DTS에 0x21을 쓰면 ffmpeg가 DTS 필드 전체를 폐기해 B-frame 스트림의 dts=pts로 오해한다.
+        // PTS만 실을 때 PTS는 '0010'(0x21), PTS+DTS일 때는 PTS '0011'(0x31) + DTS '0001'(0x11)
+        // — ISO 13818-1 2.4.3.7. DTS에 0x21을 쓰면 ffmpeg가 DTS 필드 전체를 폐기해 B-frame 스트림의 dts=pts로 오해한다.
+        // PTS+DTS인데 PTS를 '0010'으로 두면 ffmpeg는 통과하지만 Apple mpeg2parser는 첫 세그에서 -12976으로
+        // 거부해, B-frame 방송(공개 방송 16개 중 6개)은 네이티브 재생이 늘 CDN으로 넘어갔다(2026-10-18 시뮬레이터 실측).
         func tsBase(_ t: UInt64, prefix: UInt8 = 0x21) -> [UInt8] {
             let v = t & 0x1ffffffff           // 33bit
             let b0 = prefix | UInt8(truncatingIfNeeded: (v >> 29) & 0x0e)
@@ -363,14 +430,14 @@ final class TSMuxer {
             let b4 = UInt8(truncatingIfNeeded: (v & 0x7f) << 1) | 0x01
             return [b0, b1, b2, b3, b4]
         }
-        header.append(contentsOf: tsBase(pts))
+        header.append(contentsOf: tsBase(pts, prefix: needDTS ? 0x31 : 0x21))
         if needDTS { header.append(contentsOf: tsBase(dts, prefix: 0x11)) }
         header.append(data)
         return header
     }
 
     /// TS 패킷으로 쪼갠다( payload>184 bytes 시 adaptation field로 정렬).
-    private func tsPacketize(payload: Data, pid: UInt16, randomAccess: Bool, cc: inout UInt8, pcrTicks: UInt64 = 0) -> Data {
+    private func tsPacketize(payload: Data, pid: UInt16, randomAccess: Bool, cc: inout UInt8, pcrTicks: UInt64? = nil) -> Data {
         var out = Data(capacity: 188 * ((payload.count / 184) + 1))
         var offset = 0
         var first = true
@@ -386,14 +453,13 @@ final class TSMuxer {
             // 'channel element not allocated' 디코드 에러를 냈다(2026-10-12 실측).
             let last = remaining <= 184
             var chunk: Int
-            if first && randomAccess {
+            if first && randomAccess, let pcrBase = pcrTicks {
                 // AF: PCR(6B)+random_access — PMT가 PCR_PID=video(0x100)를 선언하는데 PCR이
                 // 0개면 Apple mpeg2parser가 트랙 파싱 직후 -12976으로 죽는다(2026-10-17 실측).
                 // ffmpeg TS도 모든 비디오 PES 시작 패킷에 PCR을 싣는다.
                 packet[3] = 0x30 | (cc & 0x0f)   // adaptation+payload
                 packet[4] = 7                     // AF length: [5..11] 플래그1+PCR6
                 packet[5] = 0x50                  // PCR_flag + random_access_indicator
-                let pcrBase = pcrTicks
                 packet[6] = UInt8((pcrBase >> 25) & 0xff)
                 packet[7] = UInt8((pcrBase >> 17) & 0xff)
                 packet[8] = UInt8((pcrBase >> 9) & 0xff)
@@ -401,6 +467,14 @@ final class TSMuxer {
                 packet[10] = UInt8(((pcrBase & 1) << 7) | 0x7e)   // reserved(6비트 전부 1)+ext 상위 1비트(0)
                 packet[11] = 0x80                    // ext 하위 8비트(0)+marker
                 bodyStart = 12
+                chunk = min(remaining, 188 - bodyStart)
+            } else if first && randomAccess {
+                // 오디오: random_access만 싣는다. PCR은 PMT의 PCR_PID(비디오)에만 — 예전엔 오디오 PES마다
+                // PCR=0을 실어 비디오 PCR 타임라인과 어긋난 값이 매 묶음 섞였다.
+                packet[3] = 0x30 | (cc & 0x0f)
+                packet[4] = 1
+                packet[5] = 0x40                  // random_access_indicator
+                bodyStart = 6
                 chunk = min(remaining, 188 - bodyStart)
             } else if last {
                 // AF: [4]=AFlen, [5]=flags(0), [6...]=0xFF stuffing — payload를 AF 뒤로 배치

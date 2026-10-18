@@ -19,6 +19,10 @@ final class LocalHLSServer {
         var targetDurationMS = 1000
         var segments: [Int] = []      // 노출할 세그먼트 시퀀스(최근 N개)
         var mediaSequenceBase = 0
+        /// EXT-X-DISCONTINUITY를 붙일 세그(송출 재시작 직후 첫 세그).
+        var discontinuities: Set<Int> = []
+        /// 노출 창에서 밀려난 discontinuity 수 — EXT-X-DISCONTINUITY-SEQUENCE(RFC 8216 4.3.3.3).
+        var discontinuitySequence = 0
     }
 
     private var listener: NWListener?
@@ -83,15 +87,18 @@ final class LocalHLSServer {
             segments[segment.sequence] = segment.data
             if segment.durationMS > maxSegDurationMS { maxSegDurationMS = segment.durationMS }
             segDurationMS[segment.sequence] = segment.durationMS
+            if segment.discontinuity { playlist.discontinuities.insert(segment.sequence) }
             playlist.segments.append(segment.sequence)
-            if playlist.segments.count > maxKept {
-                let dropped = playlist.segments.removeFirst()
-                segments.removeValue(forKey: dropped)
-            }
+            // 노출 창에서 밀려난 세그도 maxKept개까지는 남겨 두고(늦게 요청하는 플레이어 대비) 그보다 오래된 것은
+            // 지운다. 예전엔 playlist.segments가 아래에서 6개로 잘려 maxKept 분기가 한 번도 돌지 않았고,
+            // 세그(1080p60 기준 초당 약 1MB)가 재생 내내 메모리에 쌓였다(2026-10-18 코드 확인).
+            segments.removeValue(forKey: segment.sequence - maxKept)
+            segDurationMS.removeValue(forKey: segment.sequence - maxKept)
             // 노출 창(6)을 벗어난 세그부터 MEDIA-SEQUENCE 진행 — 노출 목록과 base가 항상 일치.
             while playlist.segments.count > playlistWindow {
                 playlist.mediaSequenceBase += 1
-                playlist.segments.removeFirst()
+                let dropped = playlist.segments.removeFirst()
+                if playlist.discontinuities.remove(dropped) != nil { playlist.discontinuitySequence += 1 }
             }
         }
     }
@@ -136,10 +143,17 @@ final class LocalHLSServer {
     }
 
     private func playlistData() -> Data {
+        // TARGETDURATION = EXTINF를 '반올림한' 최댓값(RFC 8216 4.3.3.1). 올림이면 실측 길이 2.002초 같은
+        // 세그가 나올 때마다 2→3으로 바뀌는데, 이 태그는 라이브 중에 바뀌면 안 된다.
         var lines: [String] = ["#EXTM3U", "#EXT-X-VERSION:3",
-                               "#EXT-X-TARGETDURATION:\(max(1, (maxSegDurationMS + 999) / 1000))",
+                               "#EXT-X-TARGETDURATION:\(max(1, (maxSegDurationMS + 500) / 1000))",
                                "#EXT-X-MEDIA-SEQUENCE:\(playlist.mediaSequenceBase)"]
+        if playlist.discontinuitySequence > 0 {
+            lines.append("#EXT-X-DISCONTINUITY-SEQUENCE:\(playlist.discontinuitySequence)")
+        }
         for seq in playlist.segments.suffix(playlistWindow) {
+            // 송출 재시작으로 타임스탬프·해상도·샘플레이트가 바뀐 경계 — 없으면 AVPlayer가 시각 역행을 오류로 본다.
+            if playlist.discontinuities.contains(seq) { lines.append("#EXT-X-DISCONTINUITY") }
             lines.append(String(format: "#EXTINF:%.3f,", Double(segDurationMS[seq] ?? maxSegDurationMS) / 1000.0))
             lines.append("seg-\(seq).ts")
         }
