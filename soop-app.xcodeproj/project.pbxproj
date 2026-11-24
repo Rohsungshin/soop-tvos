@@ -10,6 +10,7 @@
 		0555E4BBB42625CE26D0E6EE /* SettingsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18C6158E73EFBF4795B1FE18 /* SettingsViewController.swift */; };
 		05B3B8913BD930CC3B9733AE /* LiveListViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2568234AD72D7C205D3C7958 /* LiveListViewController.swift */; };
 		148812C30F5C8D903E571F9A /* LocalHLSServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40A2871807FD3EB1B0343ACF /* LocalHLSServer.swift */; };
+		17CE81FC8362C0A67AD331DA /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4F93E96C633650F2116C34A /* SceneDelegate.swift */; };
 		184967B6CE4154F3B9E35BAE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA39C3812075BCD663740327 /* AppDelegate.swift */; };
 		29603C9AE2911E0A99BAA4D2 /* RootTabBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C734E25326258F44C0409BDB /* RootTabBarController.swift */; };
 		3E35E3D0E06842958F61C342 /* TSMuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765105FC8D0C4CFD2D6CD803 /* TSMuxer.swift */; };
@@ -46,6 +47,7 @@
 		8941AC06A65AC53305B588E7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8CAAA9260F324A43BD2918AC /* HomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewController.swift; sourceTree = "<group>"; };
 		A35787DE9B43A4D119349551 /* PlayerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerViewController.swift; sourceTree = "<group>"; };
+		A4F93E96C633650F2116C34A /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		AA39C3812075BCD663740327 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		AB84F945F32A31385078D069 /* DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystem.swift; sourceTree = "<group>"; };
 		AD60C07BDA2D05CEDADC0C3B /* ServerLoginViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerLoginViewController.swift; sourceTree = "<group>"; };
@@ -81,6 +83,7 @@
 				E7FBB9EB3396170F15FB3F97 /* PlaybackSettings.swift */,
 				A35787DE9B43A4D119349551 /* PlayerViewController.swift */,
 				C734E25326258F44C0409BDB /* RootTabBarController.swift */,
+				A4F93E96C633650F2116C34A /* SceneDelegate.swift */,
 				0446F9B64863622664FC4678 /* SearchViewController.swift */,
 				AD60C07BDA2D05CEDADC0C3B /* ServerLoginViewController.swift */,
 				18C6158E73EFBF4795B1FE18 /* SettingsViewController.swift */,
@@ -210,6 +213,7 @@
 				8001A7E733CFC611564364D5 /* SOOPAPIClient.swift in Sources */,
 				932305DF1865B806EEC790BE /* SOOPNativePlayerController.swift in Sources */,
 				F302CCEE970E0FE0F0FF1643 /* SOOPNativeReceiver.swift in Sources */,
+				17CE81FC8362C0A67AD331DA /* SceneDelegate.swift in Sources */,
 				C7B683ABADAEEBB48663010F /* SearchViewController.swift in Sources */,
 				9D8F6F29F1535307C621139C /* ServerLoginViewController.swift in Sources */,
 				0555E4BBB42625CE26D0E6EE /* SettingsViewController.swift in Sources */,

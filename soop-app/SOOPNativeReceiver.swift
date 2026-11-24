@@ -259,10 +259,23 @@ final class SOOPNativeReceiver {
         // DispatchSourceTimer를 쓴다 — GCD 직렬 큐 스레드의 RunLoop는 기본적으로 돌지
         // 않아 Foundation Timer가 발동하지 않았다. keep-alive(0xcb30, 4초)가 서버로 전혀
         // 나가지 않으면 초기 3세그 버스트 뒤 연결이 끊긴다(2026-10-16 시뮬레이터 실측).
+        //
+        // 서버는 송신을 (재)시작할 때마다 약 32초 분량(약 2,000프레임)만 보내고 멈춘다. 송신 중에 받은
+        // keep-alive는 이 창을 늘리지 못하고, 멈춘 뒤 받은 keep-alive가 다음 창을 연다 — 4초 주기만으로는
+        // 32초마다 최대 4초(실측 2.3~2.6초) 공백이 생겨 플레이리스트가 1.5×TD를 넘게 멈추고 AVPlayer가
+        // -12888 후 stall했다(2026-10-18 공개 방송 19개 전부 실측). 미디어가 0.4초 끊기면 바로 보낸다
+        // (조기 keep-alive로 공백 약 0.6초 실측). 평소 프레임 간격은 17~33ms이고, 망 지터로 잘못 걸려도
+        // 30프레임 재전송(시퀀스로 중복 제거)이 한 번 더 올 뿐이다. 1초에 한 번까지만 보낸다.
+        lastKeepAliveAt = Date()
         let ka = DispatchSource.makeTimerSource(queue: queue)
-        ka.schedule(deadline: .now() + 4, repeating: 4)
+        ka.schedule(deadline: .now() + 0.25, repeating: 0.25)
         ka.setEventHandler { [weak self] in
-            guard let self = self, self.running else { return }
+            guard let self = self, self.running, self.nextFrame > 0 else { return }   // 첫 미디어 전엔 보낼 프레임 번호가 없다
+            let now = Date()
+            let sinceKeepAlive = now.timeIntervalSince(self.lastKeepAliveAt)
+            let idle = now.timeIntervalSince(self.lastMediaAt) >= 0.4
+            guard sinceKeepAlive >= 4 || (idle && sinceKeepAlive >= 1) else { return }
+            self.lastKeepAliveAt = now
             var b = Data(capacity: 16)
             b.appendLE(UInt32(self.quality.rawValue))
             let back: UInt64 = self.nextFrame > 30 ? self.nextFrame - 30 : 0
@@ -287,6 +300,8 @@ final class SOOPNativeReceiver {
 
     static let mediaTimeoutSeconds: TimeInterval = 16
     private var lastMediaAt = Date()
+    /// 핸드셰이크(0xcb30 type 2)도 송신 요청이므로 첫 4초 주기는 타이머 시작(연결 직후)부터 센다.
+    private var lastKeepAliveAt = Date()
 
     private func markMedia() {
         lastMediaAt = Date()

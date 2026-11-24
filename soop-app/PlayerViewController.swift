@@ -134,6 +134,9 @@ final class PlayerViewController: UIViewController {
     private var nativeController: SOOPNativePlayerController?
     /// 네이티브 폴백으로 CDN 자동 재생에 이미 넘어갔는지(토스트·재폴백 방지).
     private var didFallbackFromNative = false
+    /// 재생 중 끊긴 네이티브 세션을 원본으로 다시 연결한 횟수(플레이어 화면당). 다 쓰면 CDN으로 넘어간다.
+    private var nativeReconnects = 0
+    private static let maxNativeReconnects = 3
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -630,6 +633,14 @@ final class PlayerViewController: UIViewController {
             // 이미 에러 카드가 떠 있으면 중복 처리하지 않는다. 그 밖에는 기존 폴백 로직을 그대로 탄다
             // (폴백 전이면 대체 URL, 폴백했으면 에러 카드).
             guard self.errorContainer == nil else { return }
+            // 네이티브(루프백) 재생이 끊긴 경우는 네이티브 복구로 — tryFallback은 CDN URL로 조용히 바꿔
+            // 수신기를 뒤에 남겨 둔 채 화질 메뉴만 540p/360p로 바꿔 놓았다.
+            if let native = self.nativeController {
+                native.stop()
+                self.nativeController = nil
+                self.recoverFromNativeFailure(info: info, reason: .protocolError("loopback playback failed mid-stream"))
+                return
+            }
             self.tryFallback(info: info, originalError: err)
         }
     }
@@ -680,17 +691,42 @@ final class PlayerViewController: UIViewController {
         }
         controller.onFallback = { [weak self] error in
             guard let self = self, self.nativeController === controller else { return }
-            print("[Player] native failed: \(error.localizedDescription) → CDN fallback")
+            print("[Player] native failed: \(error.localizedDescription)")
             self.nativeController = nil
-            self.fallbackToCDN(info: info, reason: error)
+            self.recoverFromNativeFailure(info: info, reason: error)
         }
         controller.start(bjId: info.bjId, broadNo: info.broadNo)
+    }
+
+    /// 네이티브 세션이 끊겼을 때. 재생까지 갔던 세션이면 원본으로 다시 연결하고(일시적 끊김 한 번으로 그 방송을
+    /// 끝까지 540p로 보게 되지 않게), 재생 전에 실패했거나 재연결을 다 썼으면 CDN으로 넘어간다.
+    private func recoverFromNativeFailure(info: StreamInfo, reason: SOOPNativeError) {
+        guard didRevealPlayer, nativeReconnects < Self.maxNativeReconnects else {
+            fallbackToCDN(info: info, reason: reason)
+            return
+        }
+        nativeReconnects += 1
+        print("[Player] native reconnect \(nativeReconnects)/\(Self.maxNativeReconnects) (\(reason.localizedDescription))")
+        tearDownAVPlayer()
+        didRevealPlayer = false   // 재연결이 재생 전에 또 실패하면 위 가드로 CDN에 넘어가게
+        showPreRoll(status: "원본 다시 연결 중…")
+        startNativePlayback(info: info)
+    }
+
+    /// 재생 중 다시 연결할 때 프리롤을 다시 띄운다(내려간 프리롤 위로 빈 화면이 보이지 않게).
+    private func showPreRoll(status: String) {
+        preRollContainer.alpha = 1
+        preRollContainer.isHidden = false
+        preRollSpinner.isHidden = false
+        preRollSpinner.startAnimating()
+        preRollStatusLabel.text = status
     }
 
     /// 루프백 HLS URL로 AVPlayer를 띄운다(헤더·쿠키 불필요 — 127.0.0.1).
     private func playLoopbackHLS(_ url: URL) {
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
+        didRevealPlayer = false     // startCDNPlayback과 같다 — 재연결·다시 시도로 들어온 새 플레이어도 드러나야 한다
         let vc = AVPlayerViewController()
         vc.player = player
         vc.delegate = self
@@ -720,11 +756,12 @@ final class PlayerViewController: UIViewController {
                     self.revealPlayer(item: it)
                     self.observeNativeResolution()
                 } else if it.status == .failed {
-                    // 루프백 재생 실패 — CDN으로.
+                    // 루프백 재생 실패 — 재연결 또는 CDN으로.
                     guard let info = self.streamInfo else { return }
+                    print("[Player] loopback FAILED: \(String(describing: it.error))")
                     self.nativeController?.stop()
                     self.nativeController = nil
-                    self.fallbackToCDN(info: info, reason: .protocolError("loopback playback failed"))
+                    self.recoverFromNativeFailure(info: info, reason: .protocolError("loopback playback failed"))
                 }
             }
         }
@@ -754,7 +791,14 @@ final class PlayerViewController: UIViewController {
     private func fallbackToCDN(info: StreamInfo, reason: SOOPNativeError) {
         guard !didFallbackFromNative else { return }
         didFallbackFromNative = true
-        preRollStatusLabel?.text = "스트림 연결 중..."
+        // 루프백 플레이어가 남아 있으면(재생 중 끊김) 정리하고 프리롤을 다시 띄운다. 예전엔 그대로 둔 채
+        // CDN 플레이어를 하나 더 얹어 AVPlayer 두 개가 겹쳐 있었다.
+        if avVC != nil {
+            tearDownAVPlayer()
+            showPreRoll(status: "스트림 연결 중...")
+        } else {
+            preRollStatusLabel?.text = "스트림 연결 중..."
+        }
         // 기존 실패/폴백 상태를 리셋하고 CDN 경로로 처음부터.
         didFallback = false
         startCDNPlayback(info: info)

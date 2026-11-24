@@ -3,17 +3,11 @@ import UIKit
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
-    var window: UIWindow?
-
+    // 창은 SceneDelegate 가 만든다 (tvOS 27 SDK 의 UIScene 생명주기 요구).
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = RootTabBarController()
-        window.makeKeyAndVisible()
-        self.window = window
-
         // 자동 테스트 모드 — `--soop-selftest` 인자로 실행 시 스트림 해석/화질 검증만 수행.
         if CommandLine.arguments.contains("--soop-selftest") {
             SOOPAPIClient.shared.runSelfTest()
